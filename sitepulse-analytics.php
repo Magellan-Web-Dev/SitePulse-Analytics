@@ -2,7 +2,7 @@
 /**
  * Plugin Name: SitePulse Analytics
  * Description: Tracks page views, link and button clicks, form submissions, hover activity, scroll depth, and other visitor interactions. Analytics are displayed in the WordPress dashboard and can be sent on a schedule as JSON to one or more webhook endpoints.
- * Version:     1.1.0
+ * Version:     1.1.1
  * Requires at least: 6.3
  * Requires PHP: 8.1
  * Author:      Chris Paschall
@@ -38,7 +38,7 @@ if (version_compare(PHP_VERSION, '8.1', '<')) {
  */
 } else {
 
-    define('SPA_VERSION', '1.1.0');
+    define('SPA_VERSION', '1.1.1');
     define('SPA_PLUGIN_FILE', __FILE__);
     define('SPA_PLUGIN_DIR', plugin_dir_path(__FILE__));
     define('SPA_PLUGIN_URL', plugin_dir_url(__FILE__));
