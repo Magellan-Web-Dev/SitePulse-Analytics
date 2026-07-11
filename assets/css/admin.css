@@ -1,0 +1,155 @@
+/**
+ * SitePulse Analytics — admin styles.
+ *
+ * Shared by the dashboard and settings pages. Uses core wp-admin colors
+ * (#2271b1 links/accent, #dcdcde borders, #646970 muted text) so the plugin
+ * screens feel native.
+ */
+
+.spa-wrap {
+    max-width: 1200px;
+}
+
+/* Summary cards ------------------------------------------------------- */
+
+.spa-cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+    gap: 16px;
+    margin: 20px 0;
+}
+
+.spa-card {
+    background: #fff;
+    border: 1px solid #dcdcde;
+    border-radius: 8px;
+    padding: 20px;
+    box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
+}
+
+.spa-card-value {
+    font-size: 32px;
+    font-weight: 600;
+    line-height: 1.2;
+    color: #1d2327;
+}
+
+.spa-card-label {
+    color: #646970;
+    margin-top: 4px;
+}
+
+/* Daily page-view chart ------------------------------------------------ */
+
+.spa-chart {
+    display: flex;
+    align-items: flex-end;
+    gap: 2px;
+    height: 180px;
+    background: #fff;
+    border: 1px solid #dcdcde;
+    border-radius: 8px;
+    padding: 16px;
+    box-sizing: border-box;
+}
+
+.spa-chart-bar {
+    flex: 1 1 0;
+    min-width: 2px;
+    min-height: 2px;
+    background: #2271b1;
+    border-radius: 2px 2px 0 0;
+    transition: background-color 0.15s ease-in-out;
+}
+
+.spa-chart-bar:hover {
+    background: #135e96;
+}
+
+/* Sections and tables --------------------------------------------------- */
+
+.spa-section {
+    margin-top: 24px;
+}
+
+.spa-section h2 {
+    margin-bottom: 8px;
+}
+
+.spa-tables {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(440px, 1fr));
+    gap: 0 24px;
+}
+
+.spa-tables td,
+.spa-tables th {
+    word-break: break-word;
+}
+
+/* Period filter --------------------------------------------------------- */
+
+.spa-period-filter {
+    margin: 12px 0;
+    color: #646970;
+}
+
+/* Webhook endpoint repeater (settings page) ------------------------------ */
+
+.spa-webhook-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.spa-webhook-row input[type="url"] {
+    flex: 0 1 420px;
+}
+
+/* About page ------------------------------------------------------------ */
+
+.spa-about h2 {
+    margin-top: 32px;
+}
+
+.spa-about-lead {
+    font-size: 14px;
+    max-width: 780px;
+}
+
+.spa-about-meta {
+    color: #646970;
+    margin-bottom: 8px;
+}
+
+.spa-about-features .spa-card h3 {
+    margin: 0 0 8px;
+}
+
+.spa-about-features .spa-card p {
+    margin: 0;
+    color: #50575e;
+}
+
+.spa-about-table {
+    max-width: 900px;
+}
+
+.spa-about-list li {
+    margin-bottom: 6px;
+}
+
+.spa-about-code {
+    background: #fff;
+    border: 1px solid #dcdcde;
+    border-radius: 8px;
+    padding: 16px;
+    max-width: 900px;
+    overflow-x: auto;
+}
+
+.spa-about-code code {
+    background: transparent;
+    padding: 0;
+}
