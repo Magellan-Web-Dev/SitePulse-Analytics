@@ -93,12 +93,13 @@ final class AboutPage
         echo '<div class="spa-about-intro spa-card">';
         echo '<p>';
         echo '<strong>SitePulse Analytics</strong> is a self-hosted visitor analytics plugin. '
-            . 'It tracks page views, link and button clicks, form submissions, mouse hover activity, and scroll depth, '
-            . 'then surfaces everything right here in the WordPress dashboard — making it easy to identify popular pages, '
-            . 'important conversion actions, and the areas of your content visitors actually engage with. '
-            . 'On a configurable schedule, aggregated analytics can also be delivered as JSON to one or more webhook '
-            . 'endpoints, with every attempt recorded in a dedicated Delivery Log and, optionally, exposed through a '
-            . 'read-only REST API.';
+            . 'It tracks page views, link and button clicks, form submissions, confirmed form conversions with campaign '
+            . 'attribution, mouse hover activity, and scroll depth, then surfaces everything right here in the WordPress '
+            . 'dashboard — making it easy to identify popular pages, which campaigns and channels actually produce leads, '
+            . 'and the areas of your content visitors engage with. '
+            . 'On a configurable schedule, aggregated analytics (including individual attributed conversions) can also be '
+            . 'delivered as JSON to one or more webhook endpoints, with every attempt recorded in a dedicated Delivery Log '
+            . 'and, optionally, exposed through a read-only REST API.';
         echo '</p>';
 
         echo '<ul class="spa-about-requirements">';
@@ -135,6 +136,14 @@ final class AboutPage
             [
                 'title' => 'Form Submissions',
                 'text'  => 'Native submit events are captured before any AJAX handler can swallow them, so Elementor and similar AJAX-powered forms are counted too. Counted at submit time — attempts, not confirmed successes.',
+            ],
+            [
+                'title' => 'Confirmed Conversions',
+                'text'  => 'A separate form_success event fires only when the form plugin reports the server accepted the submission (Elementor Pro, Contact Form 7, WPForms, Gravity Forms — or a custom spa:conversion event). Each conversion gets a unique id and a snapshot of the session\'s campaign attribution.',
+            ],
+            [
+                'title' => 'Campaigns & Channels',
+                'text'  => 'All six utm parameters and ad-click identifiers (gclid, fbclid, …) are captured from tagged landings (only the click identifier\'s name is stored, never its value), and every visit is grouped into a marketing channel — Paid Search, Organic Social, Email, Referral, Direct, and more.',
             ],
             [
                 'title' => 'Hover Activity',
@@ -174,14 +183,15 @@ final class AboutPage
     private static function renderDashboardSection(): void
     {
         $sections = [
-            'Summary cards'         => 'Totals for page views, clicks, form submissions, hovers, and scroll milestones over the selected period.',
+            'Summary cards'         => 'Totals for page views, clicks, form submit attempts, confirmed conversions, hovers, and scroll milestones over the selected period.',
             'Daily Page Views'      => 'A bar chart of traffic across the period, for spotting trends and spikes.',
             'Top Pages'             => 'Most-viewed pages with view and unique-session counts.',
             'Top Clicked Elements'     => 'Which links and buttons visitors click most — your conversion actions.',
             'Top Form Submit Attempts' => 'Which forms are submitted, and on which pages (counted at submit time; success is not confirmed).',
             'Most Hovered Elements'    => 'Where visitor attention lingers before (or without) a click.',
             'Top Referrers'            => 'Which external sites and pages send you traffic.',
-            'Campaigns'                => 'Pageviews attributed to utm_source / utm_medium / utm_campaign parameters — last-touch within the session: the most recent tagged landing attributes the visit from that point on, and untagged pages inherit it.',
+            'Campaigns'                => 'Sessions, views, confirmed conversions, and conversion rate per utm source/medium/campaign — last-touch within the session: the most recent tagged landing attributes the visit from that point on, and untagged pages inherit it.',
+            'Channels'                 => 'Sessions, views, confirmed conversions, and conversion rate per marketing channel (Paid Search, Organic Social, Email, Referral, Direct, …), classified as events arrive.',
             'Devices'                  => 'Mobile versus desktop share of page views.',
             'Recent Activity'          => 'The latest raw events, useful for verifying tracking is working.',
         ];
@@ -224,14 +234,16 @@ final class AboutPage
             (string) wp_json_encode([
                 'events' => [
                     [
-                        'type'         => 'pageview',
-                        'page_url'     => home_url('/pricing/'),
-                        'page_title'   => 'Pricing',
-                        'referrer'     => 'https://www.google.com/',
-                        'session_id'   => '3f2a9c1b8e0d4f5a6b7c8d9e0f1a2b3c',
-                        'utm_source'   => 'newsletter',
-                        'utm_medium'   => 'email',
-                        'utm_campaign' => 'spring-sale',
+                        'type'          => 'pageview',
+                        'page_url'      => home_url('/pricing/'),
+                        'page_title'    => 'Pricing',
+                        'referrer'      => 'https://www.google.com/',
+                        'session_id'    => '3f2a9c1b8e0d4f5a6b7c8d9e0f1a2b3c',
+                        'utm_source'    => 'google',
+                        'utm_medium'    => 'cpc',
+                        'utm_campaign'  => 'spring-sale',
+                        'utm_term'      => 'pricing',
+                        'click_id_type' => 'gclid',
                     ],
                     [
                         'type'          => 'click',
@@ -240,6 +252,19 @@ final class AboutPage
                         'element_label' => 'Get a Quote',
                         'target_url'    => home_url('/quote/'),
                         'session_id'    => '3f2a9c1b8e0d4f5a6b7c8d9e0f1a2b3c',
+                    ],
+                    [
+                        'type'          => 'form_success',
+                        'page_url'      => home_url('/quote/'),
+                        'element_tag'   => 'form',
+                        'element_label' => 'quote-form',
+                        'event_value'   => 'c9d4e1f2a3b4c5d6e',
+                        'session_id'    => '3f2a9c1b8e0d4f5a6b7c8d9e0f1a2b3c',
+                        'utm_source'    => 'google',
+                        'utm_medium'    => 'cpc',
+                        'utm_campaign'  => 'spring-sale',
+                        'utm_term'      => 'pricing',
+                        'click_id_type' => 'gclid',
                     ],
                 ],
             ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
@@ -270,9 +295,11 @@ final class AboutPage
             . '30 minutes of inactivity, so it groups one visit without becoming a persistent visitor ID.</li>';
         echo '<li>Tracked URLs are canonicalized to their path — no query strings are ever stored, so search terms, '
             . 'tokens, and emails in page-URL or referrer query strings never reach the database. Campaign parameter '
-            . 'values (<code>utm_source</code>/<code>utm_medium</code>/<code>utm_campaign</code>) <em>are</em> stored '
+            . 'values (all six <code>utm_*</code> fields) <em>are</em> stored '
             . '(values containing an <code>@</code> are dropped as likely emails) — never put personal information in '
-            . 'UTM parameters. Clicked <code>mailto:</code>/<code>tel:</code> destinations are stored whole.</li>';
+            . 'UTM parameters. Ad-click identifiers (<code>gclid</code>, <code>fbclid</code>, …) are recognized, but only '
+            . 'the parameter <em>name</em> is stored — the identifier value never leaves the browser. '
+            . 'Clicked <code>mailto:</code>/<code>tel:</code> destinations are stored whole.</li>';
         echo '<li>Optionally, visitors sending Do Not Track / Global Privacy Control signals can be excluded entirely '
             . '(off by default; toggle in Settings) — enforced both client-side and, as a backstop, at the REST endpoint.</li>';
         echo '<li>No IP addresses or user agents are stored — only a coarse mobile/desktop device bucket. '
@@ -317,7 +344,7 @@ final class AboutPage
         echo '<pre class="spa-about-code">' . esc_html(
             (string) wp_json_encode([
                 'source'         => 'sitepulse-analytics',
-                'plugin_version' => defined('SPA_VERSION') ? SPA_VERSION : '1.1.0',
+                'plugin_version' => defined('SPA_VERSION') ? SPA_VERSION : '1.2.0',
                 'website_info'   => [
                     'name'   => get_bloginfo('name'),
                     'url'    => home_url(),
@@ -331,14 +358,36 @@ final class AboutPage
                     'end'   => '2026-07-10T12:00:00+00:00',
                 ],
                 'analytics'      => [
-                    'totals'          => ['pageview' => 1240, 'click' => 512, 'form_submit' => 38, 'hover' => 940, 'scroll_depth' => 2210],
+                    'totals'          => ['pageview' => 1240, 'click' => 512, 'form_submit' => 38, 'form_success' => 24, 'hover' => 940, 'scroll_depth' => 2210],
                     'daily_pageviews' => [['date' => '2026-07-09', 'count' => 610], ['date' => '2026-07-10', 'count' => 630]],
                     'top_pages'       => [['page_url' => home_url('/'), 'page_title' => 'Home', 'views' => 400, 'sessions' => 310]],
                     'top_clicks'      => [['element_label' => 'Get a Quote', 'element_tag' => 'a', 'target_url' => home_url('/quote/'), 'clicks' => 88]],
                     'top_forms'       => [['element_label' => 'contact-form', 'page_url' => home_url('/contact/'), 'submissions' => 21]],
                     'top_hovers'      => [['element_label' => 'Pricing', 'element_tag' => 'a', 'hovers' => 130]],
                     'top_referrers'   => [['referrer' => 'https://www.google.com/', 'visits' => 210]],
-                    'top_campaigns'   => [['utm_source' => 'newsletter', 'utm_medium' => 'email', 'utm_campaign' => 'spring-sale', 'views' => 96]],
+                    'top_campaigns'   => [[
+                        'utm_source' => 'newsletter', 'utm_medium' => 'email', 'utm_campaign' => 'spring-sale',
+                        'utm_id' => 'cmp-2210', 'channel' => 'Email',
+                        'views' => 96, 'sessions' => 74, 'conversions' => 7, 'conversion_rate' => 9.46,
+                    ]],
+                    'channels'        => [['channel' => 'Email', 'views' => 96, 'sessions' => 74, 'conversions' => 7, 'conversion_rate' => 9.46]],
+                    'conversions'     => [
+                        'total'  => 24,
+                        'recent' => [[
+                            'conversion_id' => 'c1f52c1d6a4b98e73',
+                            'form'          => 'contact-form',
+                            'page_url'      => home_url('/contact/'),
+                            'referrer'      => home_url('/services/'),
+                            'device'        => 'desktop',
+                            'occurred_at'   => '2026-07-10 09:14:02',
+                            'attribution'   => [
+                                'channel'       => 'Paid Search',
+                                'utm_source'    => 'google', 'utm_medium' => 'cpc', 'utm_campaign' => 'summer-sale',
+                                'utm_id'        => '', 'utm_term' => '', 'utm_content' => '',
+                                'click_id_type' => 'gclid',
+                            ],
+                        ]],
+                    ],
                     'devices'         => ['desktop' => 820, 'mobile' => 420],
                 ],
             ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
@@ -447,6 +496,13 @@ final class AboutPage
         ) . '</pre>';
         echo '<p>Custom event types appear in the dashboard\'s "Other Events" card, in totals, and in webhook payloads under their own type key.</p>';
 
+        echo '<p>Record a confirmed conversion from frontend JavaScript — a <code>form_success</code> event with the '
+            . 'session\'s attribution snapshot and a unique conversion id — by dispatching a DOM event. Use this for '
+            . 'goals the built-in form integrations can\'t see (booking widgets, multi-step funnels, custom goals):</p>';
+        echo '<pre class="spa-about-code">' . esc_html(
+            "document.dispatchEvent(new CustomEvent('spa:conversion', {\n    detail: { name: 'appointment_booked' }\n}));"
+        ) . '</pre>';
+
         echo '<table class="spa-about-table">';
         echo '<thead><tr><th>Filter</th><th>Purpose</th></tr></thead><tbody>';
         echo '<tr><td><code>spa_tracked_event</code></td>'
@@ -461,6 +517,13 @@ final class AboutPage
             . '<td>Tune ingestion rate limits. Receives and returns <code>[\'per_ip\' => int, \'site_wide\' => int]</code>.</td></tr>';
         echo '<tr><td><code>spa_client_ip</code></td>'
             . '<td>Override the client IP used for rate limiting, e.g. to map a trusted reverse-proxy header.</td></tr>';
+        echo '<tr><td><code>spa_source_aliases</code></td>'
+            . '<td>Extend or override the map that normalizes <code>utm_source</code> values at ingestion '
+            . '(e.g. <code>\'fb\' => \'facebook\'</code>). Receives and returns <code>array&lt;string, string&gt;</code> '
+            . 'keyed by raw lowercase value.</td></tr>';
+        echo '<tr><td><code>spa_channel</code></td>'
+            . '<td>Override the marketing channel assigned to an event at ingestion. '
+            . 'Receives <code>(string $channel, array $row, string $type)</code> — return any label (up to 24 characters).</td></tr>';
         echo '<tr><td><code>spa_delivery_log_row</code></td>'
             . '<td>Inspect or modify a delivery-log row before it is stored (e.g. site-specific redaction); '
             . 'return <code>false</code> to skip logging that attempt.</td></tr>';

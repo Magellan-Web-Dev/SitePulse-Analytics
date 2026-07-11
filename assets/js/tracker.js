@@ -17,21 +17,32 @@
  *  - click        : links, buttons, and elements with role="button"
  *  - form_submit  : native form submit events, captured before any handler
  *                   can preventDefault — note these are submission *attempts*
+ *  - form_success : CONFIRMED form submissions — recorded only when the form
+ *                   plugin reports that the server accepted the submission
+ *                   (Elementor Pro, Contact Form 7, WPForms, Gravity Forms),
+ *                   or when custom code dispatches a "spa:conversion" event.
+ *                   Each carries a unique conversion id and a snapshot of the
+ *                   session's campaign attribution at conversion time.
  *  - hover        : pointer resting on an interactive element or image for the
  *                   configured dwell time (once per element per page view)
  *  - scroll_depth : 25 / 50 / 75 / 100% scroll milestones (once each per page
  *                   view; checked once on load so short pages record 100%)
  *
- * Campaign attribution: utm_source/medium/campaign from a tagged landing URL
- * are stored alongside the session and attached to every pageview in that
- * session. The model is last-touch within the session: the most recent
- * tagged landing attributes the visit from that point on; untagged pages
- * inherit it.
+ * Campaign attribution: all six utm parameters (source/medium/campaign/id/
+ * term/content) from a tagged landing URL are stored alongside the session
+ * and attached to every pageview and conversion in that session. Ad-click
+ * identifiers (gclid, fbclid, msclkid, …) are recognized too: only the
+ * parameter NAME is kept (click_id_type) — the value is a cross-site
+ * advertising ID and is never sent — and, when no utm tags are present, the
+ * source/medium they imply is filled in (e.g. gclid → google / cpc). The
+ * model is last-touch within the session: the most recent tagged landing
+ * attributes the visit from that point on; untagged pages inherit it.
  *
  * Privacy: no cookies are set. The session identifier lives in localStorage
  * and rotates after 30 minutes of inactivity, so it groups one visit without
  * becoming a persistent user ID. Tracked URLs are canonicalized to
- * origin + path (utm_source/medium/campaign travel as separate fields);
+ * origin + path (utm parameters travel as separate fields; ad-click
+ * identifier values are never sent, only which parameter was present);
  * referrers and click/form destinations are stripped of query strings and
  * fragments. Requests are sent without credentials, and visitors sending
  * Do Not Track / Global Privacy Control signals are skipped entirely when
@@ -61,6 +72,28 @@
     var SESSION_IDLE_MS = 30 * 60 * 1000;
     var INTERACTIVE = 'a, button, input[type="button"], input[type="submit"], [role="button"]';
     var PENDING_KEY = 'spa_pending';
+
+    /** utm parameter names captured from a tagged landing URL. */
+    var UTM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_id', 'utm_term', 'utm_content'];
+
+    /** Ad-click identifier parameters → the [source, medium] they imply when
+     *  the URL carries no utm tags. Only the parameter NAME is ever sent
+     *  (click_id_type); the value is a cross-site advertising identifier and
+     *  never leaves the browser. fbclid implies no medium — Facebook adds it
+     *  to organic shares too, so paid cannot be assumed. */
+    var CLICK_IDS = {
+        gclid:     ['google', 'cpc'],
+        gbraid:    ['google', 'cpc'],
+        wbraid:    ['google', 'cpc'],
+        msclkid:   ['bing', 'cpc'],
+        ttclid:    ['tiktok', 'paid'],
+        twclid:    ['twitter', 'paid'],
+        li_fat_id: ['linkedin', 'paid'],
+        fbclid:    ['facebook', '']
+    };
+
+    /** Every field a stored campaign (and a conversion's snapshot) may carry. */
+    var CAMPAIGN_KEYS = UTM_KEYS.concat(['click_id_type']);
 
     var queue = [];
     var PAGE_URL = location.origin + location.pathname;
@@ -142,7 +175,13 @@
      * the landing pageview.
      */
     function sessionCampaign(id) {
-        var tagged = CAMPAIGN.utm_source || CAMPAIGN.utm_medium || CAMPAIGN.utm_campaign;
+        var tagged = false;
+        for (var i = 0; i < CAMPAIGN_KEYS.length; i++) {
+            if (CAMPAIGN[CAMPAIGN_KEYS[i]]) {
+                tagged = true;
+                break;
+            }
+        }
 
         if (tagged) {
             if (sessionStore) {
@@ -190,20 +229,46 @@
      * ------------------------------------------------------------------ */
 
     /** Campaign parameters from the landing URL, as separate fields attached
-     *  to the pageview event (the tracked URL itself carries no query data). */
+     *  to pageview and conversion events (the tracked URL itself carries no
+     *  query data). */
     function readCampaign() {
         var out = {};
         try {
             var params = new URLSearchParams(location.search);
-            var keys = ['utm_source', 'utm_medium', 'utm_campaign'];
-            for (var i = 0; i < keys.length; i++) {
-                var value = params.get(keys[i]);
+            for (var i = 0; i < UTM_KEYS.length; i++) {
+                var value = params.get(UTM_KEYS[i]);
                 if (value) {
-                    out[keys[i]] = value.slice(0, 190);
+                    out[UTM_KEYS[i]] = value.slice(0, 190);
+                }
+            }
+            for (var key in CLICK_IDS) {
+                if (CLICK_IDS.hasOwnProperty(key) && params.get(key)) {
+                    out.click_id_type = key;
+                    if (!out.utm_source) {
+                        out.utm_source = CLICK_IDS[key][0];
+                        if (!out.utm_medium && CLICK_IDS[key][1]) {
+                            out.utm_medium = CLICK_IDS[key][1];
+                        }
+                    }
+                    break;
                 }
             }
         } catch (e) {
             // URLSearchParams unavailable — no campaign attribution.
+        }
+        return out;
+    }
+
+    /** A fresh copy of the session's current attribution, safe to attach to
+     *  an event (track() adds page context to the object it is given, so the
+     *  stored campaign object itself must never be passed in). */
+    function campaignSnapshot() {
+        var campaign = sessionCampaign(sessionId());
+        var out = {};
+        for (var i = 0; i < CAMPAIGN_KEYS.length; i++) {
+            if (campaign[CAMPAIGN_KEYS[i]]) {
+                out[CAMPAIGN_KEYS[i]] = campaign[CAMPAIGN_KEYS[i]];
+            }
         }
         return out;
     }
@@ -419,7 +484,7 @@
      *  Page views — carry the session's campaign attribution
      * ------------------------------------------------------------------ */
 
-    track('pageview', sessionCampaign(sessionId()));
+    track('pageview', campaignSnapshot());
 
     /* ------------------------------------------------------------------ *
      *  Clicks — links, buttons, and role="button" elements
@@ -464,6 +529,61 @@
         // The submit may navigate away — get the batch out now.
         flush(true);
     }, true);
+
+    /* ------------------------------------------------------------------ *
+     *  Confirmed conversions — recorded only when the form plugin reports
+     *  that the SERVER accepted the submission (its success event fires on
+     *  the AJAX success response), unlike form_submit attempts above.
+     *  Each conversion carries a unique id (event_value) so an at-least-once
+     *  redelivery can be deduplicated, plus a snapshot of the session's
+     *  campaign attribution at the moment of conversion — the conversion
+     *  record is self-contained even days after the tagged landing.
+     * ------------------------------------------------------------------ */
+
+    function trackConversion(label) {
+        var data = campaignSnapshot();
+        data.element_tag = 'form';
+        data.element_label = cleanLabel(label) || 'form';
+        data.event_value = 'c' + randomHex(16);
+        track('form_success', data);
+        flush(false);
+    }
+
+    /** The form element a plugin's success event fired on, or null. */
+    function eventForm(e) {
+        return e.target && e.target.tagName === 'FORM' ? e.target : null;
+    }
+
+    // Contact Form 7 — native DOM event, fired after the server confirms.
+    document.addEventListener('wpcf7mailsent', function (e) {
+        var id = e.detail && e.detail.contactFormId;
+        trackConversion(id ? 'cf7-' + id : 'cf7');
+    });
+
+    // Custom goals: dispatch from your own code when a conversion completes —
+    // document.dispatchEvent(new CustomEvent('spa:conversion', {detail: {name: 'appointment_booked'}}))
+    document.addEventListener('spa:conversion', function (e) {
+        trackConversion((e.detail && e.detail.name) || 'custom');
+    });
+
+    // Elementor Pro, WPForms, and Gravity Forms announce success through
+    // jQuery events, which plain addEventListener cannot observe. jQuery is
+    // guaranteed present when those plugins run their frontends.
+    if (window.jQuery) {
+        window.jQuery(document).on('submit_success', function (e) {
+            var form = eventForm(e);
+            trackConversion((form && (form.getAttribute('name') || form.id)) || 'elementor-form');
+        });
+
+        window.jQuery(document).on('wpformsAjaxSubmitSuccess', function (e) {
+            var form = eventForm(e);
+            trackConversion((form && (form.getAttribute('name') || form.id)) || 'wpforms');
+        });
+
+        window.jQuery(document).on('gform_confirmation_loaded', function (e, formId) {
+            trackConversion('gravity-form-' + formId);
+        });
+    }
 
     /* ------------------------------------------------------------------ *
      *  Hovers — pointer resting on an element for the dwell threshold

@@ -296,7 +296,8 @@ final class SettingsPage
         $labels = [
             'pageview'     => 'Page views',
             'click'        => 'Link &amp; button clicks',
-            'form_submit'  => 'Form submissions',
+            'form_submit'  => 'Form submissions (attempts)',
+            'form_success' => 'Confirmed form conversions (Elementor Pro, Contact Form 7, WPForms, Gravity Forms)',
             'hover'        => 'Mouse hover activity',
             'scroll_depth' => 'Scroll depth milestones (25/50/75/100%)',
         ];

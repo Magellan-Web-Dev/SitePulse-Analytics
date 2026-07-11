@@ -285,29 +285,34 @@ final class Reports
 
     /**
      * Top campaigns within a range, from the utm_* fields captured on
-     * pageview events. The tracker attributes a whole session to its landing
-     * campaign, so these are session-attributed pageviews, not just tagged
-     * landings.
+     * pageview events, joined with the confirmed conversions (form_success)
+     * attributed to the same campaign. The tracker attributes a whole session
+     * to its landing campaign, so these are session-attributed numbers, not
+     * just tagged landings.
      *
      * A row qualifies when *any* campaign field is set — URLs tagged with
      * only utm_campaign or utm_medium still represent campaign traffic.
+     * Conversions are counted by DISTINCT conversion id, so an at-least-once
+     * redelivery of the same conversion never double-counts.
      *
      * @param string $start UTC datetime (inclusive).
      * @param string $end   UTC datetime (exclusive).
      * @param int    $limit Maximum rows to return.
-     * @return array<int, array{utm_source: string, utm_medium: string, utm_campaign: string, views: int}>
+     * @return array<int, array{utm_source: string, utm_medium: string, utm_campaign: string, utm_id: string, channel: string, views: int, sessions: int, conversions: int, conversion_rate: float}>
      */
     public static function topCampaigns(string $start, string $end, int $limit = 10): array
     {
         global $wpdb;
-        $table = DatabaseManager::tableName();
+        $table  = DatabaseManager::tableName();
+        $tagged = "(utm_source <> '' OR utm_medium <> '' OR utm_campaign <> '')";
 
         $rows = $wpdb->get_results(
             $wpdb->prepare(
-                "SELECT utm_source, utm_medium, utm_campaign, COUNT(*) AS views
+                "SELECT utm_source, utm_medium, utm_campaign, MAX(utm_id) AS utm_id,
+                        MAX(channel) AS channel,
+                        COUNT(*) AS views, COUNT(DISTINCT session_id) AS sessions
                  FROM {$table}
-                 WHERE event_type = 'pageview'
-                   AND (utm_source <> '' OR utm_medium <> '' OR utm_campaign <> '')
+                 WHERE event_type = 'pageview' AND {$tagged}
                    AND created_at >= %s AND created_at < %s
                  GROUP BY utm_source, utm_medium, utm_campaign
                  ORDER BY views DESC
@@ -319,12 +324,215 @@ final class Reports
             ARRAY_A
         );
 
-        return array_map(static fn(array $row): array => [
-            'utm_source'   => (string) $row['utm_source'],
-            'utm_medium'   => (string) $row['utm_medium'],
-            'utm_campaign' => (string) $row['utm_campaign'],
-            'views'        => (int) $row['views'],
-        ], (array) $rows);
+        $conversionRows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT utm_source, utm_medium, utm_campaign,
+                        COUNT(DISTINCT event_value) AS conversions
+                 FROM {$table}
+                 WHERE event_type = 'form_success' AND {$tagged}
+                   AND created_at >= %s AND created_at < %s
+                 GROUP BY utm_source, utm_medium, utm_campaign",
+                $start,
+                $end
+            ),
+            ARRAY_A
+        );
+
+        $conversions = [];
+        foreach ((array) $conversionRows as $row) {
+            $key = $row['utm_source'] . '|' . $row['utm_medium'] . '|' . $row['utm_campaign'];
+            $conversions[$key] = (int) $row['conversions'];
+        }
+
+        return array_map(static function (array $row) use ($conversions): array {
+            $key      = $row['utm_source'] . '|' . $row['utm_medium'] . '|' . $row['utm_campaign'];
+            $sessions = (int) $row['sessions'];
+            $count    = $conversions[$key] ?? 0;
+
+            return [
+                'utm_source'      => (string) $row['utm_source'],
+                'utm_medium'      => (string) $row['utm_medium'],
+                'utm_campaign'    => (string) $row['utm_campaign'],
+                'utm_id'          => (string) $row['utm_id'],
+                'channel'         => (string) $row['channel'],
+                'views'           => (int) $row['views'],
+                'sessions'        => $sessions,
+                'conversions'     => $count,
+                'conversion_rate' => $sessions > 0 ? round($count / $sessions * 100, 2) : 0.0,
+            ];
+        }, (array) $rows);
+    }
+
+    /**
+     * Sessions and confirmed conversions per marketing channel within a range.
+     *
+     * The channel is classified at ingestion (see
+     * {@see \SitePulseAnalytics\Tracking\Channels}). Pageviews with an empty
+     * channel — mid-session internal navigation — are excluded, so each
+     * session is counted under the channel(s) it actually entered through.
+     *
+     * @param string $start UTC datetime (inclusive).
+     * @param string $end   UTC datetime (exclusive).
+     * @return array<int, array{channel: string, views: int, sessions: int, conversions: int, conversion_rate: float}>
+     */
+    public static function channelBreakdown(string $start, string $end): array
+    {
+        global $wpdb;
+        $table = DatabaseManager::tableName();
+
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT channel, COUNT(*) AS views, COUNT(DISTINCT session_id) AS sessions
+                 FROM {$table}
+                 WHERE event_type = 'pageview' AND channel <> ''
+                   AND created_at >= %s AND created_at < %s
+                 GROUP BY channel
+                 ORDER BY sessions DESC",
+                $start,
+                $end
+            ),
+            ARRAY_A
+        );
+
+        $conversionRows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT channel, COUNT(DISTINCT event_value) AS conversions
+                 FROM {$table}
+                 WHERE event_type = 'form_success'
+                   AND created_at >= %s AND created_at < %s
+                 GROUP BY channel",
+                $start,
+                $end
+            ),
+            ARRAY_A
+        );
+
+        $conversions = [];
+        foreach ((array) $conversionRows as $row) {
+            $conversions[(string) $row['channel']] = (int) $row['conversions'];
+        }
+
+        $out = [];
+        foreach ((array) $rows as $row) {
+            $channel  = (string) $row['channel'];
+            $sessions = (int) $row['sessions'];
+            $count    = $conversions[$channel] ?? 0;
+            unset($conversions[$channel]);
+
+            $out[] = [
+                'channel'         => $channel,
+                'views'           => (int) $row['views'],
+                'sessions'        => $sessions,
+                'conversions'     => $count,
+                'conversion_rate' => $sessions > 0 ? round($count / $sessions * 100, 2) : 0.0,
+            ];
+        }
+
+        // Channels that converted without a pageview in the window (e.g. a
+        // session that landed just before the window started) still surface.
+        foreach ($conversions as $channel => $count) {
+            if ($channel !== '') {
+                $out[] = [
+                    'channel'         => $channel,
+                    'views'           => 0,
+                    'sessions'        => 0,
+                    'conversions'     => $count,
+                    'conversion_rate' => 0.0,
+                ];
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Total confirmed conversions within a range, deduplicated by conversion
+     * id (event_value) — at-least-once delivery can store the same conversion
+     * twice, and duplicates must never inflate this number.
+     *
+     * @param string $start UTC datetime (inclusive).
+     * @param string $end   UTC datetime (exclusive).
+     * @return int
+     */
+    public static function conversionCount(string $start, string $end): int
+    {
+        global $wpdb;
+        $table = DatabaseManager::tableName();
+
+        return (int) $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COUNT(DISTINCT event_value)
+                 FROM {$table}
+                 WHERE event_type = 'form_success'
+                   AND created_at >= %s AND created_at < %s",
+                $start,
+                $end
+            )
+        );
+    }
+
+    /**
+     * Individual confirmed conversions within a range, newest first, each
+     * with the attribution snapshot taken when it occurred — self-contained
+     * records ready for a CRM or automation platform.
+     *
+     * @param string $start UTC datetime (inclusive).
+     * @param string $end   UTC datetime (exclusive).
+     * @param int    $limit Maximum conversions to return.
+     * @return array<int, array<string, string>>
+     */
+    public static function recentConversions(string $start, string $end, int $limit = 100): array
+    {
+        global $wpdb;
+        $table = DatabaseManager::tableName();
+
+        $rows = $wpdb->get_results(
+            $wpdb->prepare(
+                "SELECT event_value, element_label, page_url, referrer, device, channel,
+                        utm_source, utm_medium, utm_campaign, utm_id, utm_term, utm_content,
+                        click_id_type, created_at
+                 FROM {$table}
+                 WHERE event_type = 'form_success'
+                   AND created_at >= %s AND created_at < %s
+                 ORDER BY id DESC
+                 LIMIT %d",
+                $start,
+                $end,
+                $limit
+            ),
+            ARRAY_A
+        );
+
+        $out  = [];
+        $seen = [];
+        foreach ((array) $rows as $row) {
+            $id = (string) $row['event_value'];
+            if ($id !== '' && isset($seen[$id])) {
+                continue; // At-least-once duplicate of a conversion already listed.
+            }
+            $seen[$id] = true;
+
+            $out[] = [
+                'conversion_id' => $id,
+                'form'          => (string) $row['element_label'],
+                'page_url'      => (string) $row['page_url'],
+                'referrer'      => (string) $row['referrer'],
+                'device'        => (string) $row['device'],
+                'occurred_at'   => (string) $row['created_at'],
+                'attribution'   => [
+                    'channel'       => (string) $row['channel'],
+                    'utm_source'    => (string) $row['utm_source'],
+                    'utm_medium'    => (string) $row['utm_medium'],
+                    'utm_campaign'  => (string) $row['utm_campaign'],
+                    'utm_id'        => (string) $row['utm_id'],
+                    'utm_term'      => (string) $row['utm_term'],
+                    'utm_content'   => (string) $row['utm_content'],
+                    'click_id_type' => (string) $row['click_id_type'],
+                ],
+            ];
+        }
+
+        return $out;
     }
 
     /**
@@ -407,6 +615,11 @@ final class Reports
             'top_hovers'      => self::topHovers($start, $end),
             'top_referrers'   => self::topReferrers($start, $end),
             'top_campaigns'   => self::topCampaigns($start, $end),
+            'channels'        => self::channelBreakdown($start, $end),
+            'conversions'     => [
+                'total'  => self::conversionCount($start, $end),
+                'recent' => self::recentConversions($start, $end),
+            ],
             'devices'         => self::deviceBreakdown($start, $end),
         ];
     }

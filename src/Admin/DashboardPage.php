@@ -113,6 +113,7 @@ final class DashboardPage
         self::renderTopHovers($start, $end);
         self::renderTopReferrers($start, $end);
         self::renderCampaigns($start, $end);
+        self::renderChannels($start, $end);
         self::renderDevices($start, $end);
         echo '</div>';
 
@@ -190,6 +191,7 @@ final class DashboardPage
             'pageview'     => 'Page Views',
             'click'        => 'Clicks',
             'form_submit'  => 'Form Submit Attempts',
+            'form_success' => 'Confirmed Conversions',
             'hover'        => 'Hovers',
             'scroll_depth' => 'Scroll Milestones',
         ];
@@ -412,7 +414,8 @@ final class DashboardPage
     }
 
     /**
-     * Renders the "Campaigns" table of pageviews attributed to utm parameters.
+     * Renders the "Campaigns" table: sessions, views, and confirmed
+     * conversions attributed to each utm source/medium/campaign combination.
      *
      * @param string $start UTC datetime range start.
      * @param string $end   UTC datetime range end.
@@ -425,10 +428,10 @@ final class DashboardPage
         echo '<div class="spa-section">';
         echo '<h2>Campaigns</h2>';
         echo '<table class="wp-list-table widefat striped">';
-        echo '<thead><tr><th>Source</th><th>Medium</th><th>Campaign</th><th>Views</th></tr></thead><tbody>';
+        echo '<thead><tr><th>Source</th><th>Medium</th><th>Campaign</th><th>Sessions</th><th>Views</th><th>Conversions</th><th>Conv. Rate</th></tr></thead><tbody>';
 
         if ($rows === []) {
-            echo '<tr><td colspan="4">No campaign-tagged (utm) visits recorded in this period.</td></tr>';
+            echo '<tr><td colspan="7">No campaign-tagged (utm) visits recorded in this period.</td></tr>';
         }
 
         foreach ($rows as $row) {
@@ -436,7 +439,44 @@ final class DashboardPage
             echo '<td>' . esc_html($row['utm_source'] !== '' ? $row['utm_source'] : '—') . '</td>';
             echo '<td>' . esc_html($row['utm_medium'] !== '' ? $row['utm_medium'] : '—') . '</td>';
             echo '<td>' . esc_html($row['utm_campaign'] !== '' ? $row['utm_campaign'] : '—') . '</td>';
+            echo '<td>' . esc_html(number_format_i18n($row['sessions'])) . '</td>';
             echo '<td>' . esc_html(number_format_i18n($row['views'])) . '</td>';
+            echo '<td>' . esc_html(number_format_i18n($row['conversions'])) . '</td>';
+            echo '<td>' . esc_html($row['sessions'] > 0 ? $row['conversion_rate'] . '%' : '—') . '</td>';
+            echo '</tr>';
+        }
+
+        echo '</tbody></table></div>';
+    }
+
+    /**
+     * Renders the "Channels" table: sessions and confirmed conversions per
+     * marketing channel (Paid Search, Organic Social, Email, Referral, …).
+     *
+     * @param string $start UTC datetime range start.
+     * @param string $end   UTC datetime range end.
+     * @return void
+     */
+    private static function renderChannels(string $start, string $end): void
+    {
+        $rows = Reports::channelBreakdown($start, $end);
+
+        echo '<div class="spa-section">';
+        echo '<h2>Channels</h2>';
+        echo '<table class="wp-list-table widefat striped">';
+        echo '<thead><tr><th>Channel</th><th>Sessions</th><th>Views</th><th>Conversions</th><th>Conv. Rate</th></tr></thead><tbody>';
+
+        if ($rows === []) {
+            echo '<tr><td colspan="5">No channel data recorded in this period. Channels are classified as new events arrive, so this fills in from the moment of the update onward.</td></tr>';
+        }
+
+        foreach ($rows as $row) {
+            echo '<tr>';
+            echo '<td>' . esc_html($row['channel']) . '</td>';
+            echo '<td>' . esc_html(number_format_i18n($row['sessions'])) . '</td>';
+            echo '<td>' . esc_html(number_format_i18n($row['views'])) . '</td>';
+            echo '<td>' . esc_html(number_format_i18n($row['conversions'])) . '</td>';
+            echo '<td>' . esc_html($row['sessions'] > 0 ? $row['conversion_rate'] . '%' : '—') . '</td>';
             echo '</tr>';
         }
 

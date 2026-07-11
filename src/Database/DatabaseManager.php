@@ -6,6 +6,7 @@ namespace SitePulseAnalytics\Database;
 if (!defined('ABSPATH')) exit;
 
 use SitePulseAnalytics\Settings\Options;
+use SitePulseAnalytics\Tracking\Channels;
 
 /**
  * Owns the custom analytics events table.
@@ -29,7 +30,7 @@ final class DatabaseManager
     private const DB_VERSION_OPTION = 'spa_db_version';
 
     /** @var string Current schema version; bump when the CREATE TABLE below changes. */
-    private const DB_VERSION = '1.1.0';
+    private const DB_VERSION = '1.2.0';
 
     /**
      * Returns the fully-prefixed events table name.
@@ -75,6 +76,11 @@ final class DatabaseManager
             utm_source VARCHAR(100) NOT NULL DEFAULT '',
             utm_medium VARCHAR(100) NOT NULL DEFAULT '',
             utm_campaign VARCHAR(191) NOT NULL DEFAULT '',
+            utm_id VARCHAR(100) NOT NULL DEFAULT '',
+            utm_term VARCHAR(191) NOT NULL DEFAULT '',
+            utm_content VARCHAR(191) NOT NULL DEFAULT '',
+            click_id_type VARCHAR(20) NOT NULL DEFAULT '',
+            channel VARCHAR(24) NOT NULL DEFAULT '',
             created_at DATETIME NOT NULL,
             PRIMARY KEY  (id),
             KEY type_date (event_type,created_at),
@@ -105,7 +111,8 @@ final class DatabaseManager
     private const COLUMNS = [
         'event_type', 'page_url', 'page_title', 'element_tag', 'element_label',
         'target_url', 'event_value', 'referrer', 'session_id', 'device',
-        'utm_source', 'utm_medium', 'utm_campaign', 'created_at',
+        'utm_source', 'utm_medium', 'utm_campaign', 'utm_id', 'utm_term',
+        'utm_content', 'click_id_type', 'channel', 'created_at',
     ];
 
     /** @var int Rows deleted per statement during retention cleanup. */
@@ -206,8 +213,28 @@ final class DatabaseManager
             'utm_source'    => self::truncate(sanitize_text_field((string) ($data['utm_source'] ?? '')), 100),
             'utm_medium'    => self::truncate(sanitize_text_field((string) ($data['utm_medium'] ?? '')), 100),
             'utm_campaign'  => self::truncate(sanitize_text_field((string) ($data['utm_campaign'] ?? '')), 191),
+            'utm_id'        => self::truncate(sanitize_text_field((string) ($data['utm_id'] ?? '')), 100),
+            'utm_term'      => self::truncate(sanitize_text_field((string) ($data['utm_term'] ?? '')), 191),
+            'utm_content'   => self::truncate(sanitize_text_field((string) ($data['utm_content'] ?? '')), 191),
+            'click_id_type' => sanitize_key((string) ($data['click_id_type'] ?? '')),
+            'channel'       => self::truncate(sanitize_text_field((string) ($data['channel'] ?? '')), 24),
             'created_at'    => gmdate('Y-m-d H:i:s'),
         ];
+
+        // Normalize source/medium so one campaign never fragments across
+        // "Facebook"/"fb"/"facebook.com" rows, keep only whitelisted ad-click
+        // identifier types, and derive the marketing channel for attributed
+        // event types when the caller did not supply one.
+        $row['utm_source'] = Channels::normalizeSource($row['utm_source']);
+        $row['utm_medium'] = strtolower($row['utm_medium']);
+
+        if (!in_array($row['click_id_type'], Channels::CLICK_ID_TYPES, true)) {
+            $row['click_id_type'] = '';
+        }
+
+        if ($row['channel'] === '' && ($type === 'pageview' || $type === 'form_success')) {
+            $row['channel'] = self::truncate(Channels::classify($row, $type), 24);
+        }
 
         /**
          * Filters an event row just before it is written to the database.

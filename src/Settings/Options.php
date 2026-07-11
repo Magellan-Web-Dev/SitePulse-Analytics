@@ -22,7 +22,7 @@ final class Options
     public const OPTION_KEY = 'spa_settings';
 
     /** @var string[] Event types the frontend tracker can record. */
-    public const EVENT_TYPES = ['pageview', 'click', 'form_submit', 'hover', 'scroll_depth'];
+    public const EVENT_TYPES = ['pageview', 'click', 'form_submit', 'form_success', 'hover', 'scroll_depth'];
 
     /** @var string[] Cron recurrences selectable for webhook dispatch. */
     public const INTERVALS = ['hourly', 'twicedaily', 'daily', 'weekly'];
@@ -38,6 +38,7 @@ final class Options
             'track_pageview'     => true,
             'track_click'        => true,
             'track_form_submit'  => true,
+            'track_form_success' => true,
             'track_hover'        => true,
             'track_scroll_depth' => true,
             'exclude_logged_in'  => true,
