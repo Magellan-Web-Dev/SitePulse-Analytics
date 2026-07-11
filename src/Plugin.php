@@ -7,11 +7,14 @@ if (!defined('ABSPATH')) exit;
 
 use SitePulseAnalytics\Admin\AboutPage;
 use SitePulseAnalytics\Admin\DashboardPage;
+use SitePulseAnalytics\Admin\DeliveryLogPage;
 use SitePulseAnalytics\Admin\SettingsPage;
+use SitePulseAnalytics\Api\DeliveryLogApi;
 use SitePulseAnalytics\Database\DatabaseManager;
 use SitePulseAnalytics\Tracking\RestController;
 use SitePulseAnalytics\Tracking\ScriptLoader;
 use SitePulseAnalytics\Updates\GitHubUpdater;
+use SitePulseAnalytics\Webhook\DeliveryLog;
 use SitePulseAnalytics\Webhook\WebhookDispatcher;
 
 /**
@@ -60,19 +63,23 @@ final class Plugin
     public function init(): void
     {
         DatabaseManager::maybeUpgrade();
+        DeliveryLog::maybeCreateTable();
 
         RestController::init();
         ScriptLoader::init();
         WebhookDispatcher::init();
+        DeliveryLogApi::init();
         GitHubUpdater::init();
 
         add_action('spa_cleanup_old_events', [DatabaseManager::class, 'cleanupOldEvents']);
+        add_action('spa_cleanup_old_events', [DeliveryLog::class, 'purgeOld']);
 
         $this->ensureCronScheduled();
 
         if (is_admin()) {
             DashboardPage::init();
             SettingsPage::init();
+            DeliveryLogPage::init();
             AboutPage::init();
         }
     }

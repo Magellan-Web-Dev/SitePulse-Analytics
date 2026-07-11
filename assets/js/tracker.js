@@ -5,8 +5,12 @@
  * window.SitePulseConfig (printed by ScriptLoader immediately before this
  * script), batches events in memory, and delivers them to the plugin's REST
  * endpoint via fetch (or navigator.sendBeacon on page exit). Batches that
- * fail with a network error or a 5xx response are re-queued (bounded) and
- * retried on the next flush.
+ * fail with a network error or a 5xx response are kept in a bounded
+ * sessionStorage map keyed by batch id and resent on later flushes — by the
+ * same page or, after a navigation destroys it, the next page in this tab.
+ * Each batch is removed only when its own resend is acknowledged, so one
+ * batch's success can never discard another's undelivered events
+ * (at-least-once: a rare duplicate is possible if a response was lost).
  *
  * Tracked interactions (each individually toggleable in plugin settings):
  *  - pageview     : one event per page load
@@ -17,6 +21,12 @@
  *                   configured dwell time (once per element per page view)
  *  - scroll_depth : 25 / 50 / 75 / 100% scroll milestones (once each per page
  *                   view; checked once on load so short pages record 100%)
+ *
+ * Campaign attribution: utm_source/medium/campaign from a tagged landing URL
+ * are stored alongside the session and attached to every pageview in that
+ * session. The model is last-touch within the session: the most recent
+ * tagged landing attributes the visit from that point on; untagged pages
+ * inherit it.
  *
  * Privacy: no cookies are set. The session identifier lives in localStorage
  * and rotates after 30 minutes of inactivity, so it groups one visit without
@@ -50,6 +60,7 @@
     var HOVER_DWELL = config.hoverDwellMs || 800;
     var SESSION_IDLE_MS = 30 * 60 * 1000;
     var INTERACTIVE = 'a, button, input[type="button"], input[type="submit"], [role="button"]';
+    var PENDING_KEY = 'spa_pending';
 
     var queue = [];
     var PAGE_URL = location.origin + location.pathname;
@@ -120,6 +131,41 @@
         memorySession = id;
 
         return id;
+    }
+
+    /**
+     * The campaign attributed to this session — last-touch within the
+     * session. A tagged landing URL wins and is persisted against the
+     * session id (the most recent tagged landing re-attributes the session
+     * from that point on); untagged pageviews inherit whatever campaign the
+     * session currently carries, so a whole visit is attributed — not just
+     * the landing pageview.
+     */
+    function sessionCampaign(id) {
+        var tagged = CAMPAIGN.utm_source || CAMPAIGN.utm_medium || CAMPAIGN.utm_campaign;
+
+        if (tagged) {
+            if (sessionStore) {
+                try {
+                    sessionStore.setItem('spa_campaign', JSON.stringify({ id: id, c: CAMPAIGN }));
+                } catch (e) {
+                    // Storage full or blocked — attribution lasts this page only.
+                }
+            }
+            return CAMPAIGN;
+        }
+
+        if (sessionStore) {
+            try {
+                var stored = JSON.parse(sessionStore.getItem('spa_campaign'));
+                if (stored && stored.id === id && stored.c) {
+                    return stored.c;
+                }
+            } catch (e) {
+                // Missing or corrupt — treat as unattributed.
+            }
+        }
+        return {};
     }
 
     /** Generates a random lowercase hex string of the given length. */
@@ -232,27 +278,78 @@
         }
     }
 
-    /** Puts a failed batch back at the front of the queue, bounded so a dead
-     *  endpoint can never grow memory without limit (oldest events win). */
-    function requeue(batch) {
-        queue = batch.concat(queue).slice(0, MAX_QUEUE);
+    /* Failed batches persist in a sessionStorage MAP keyed by batch id, so
+     * they survive the page being destroyed before a retry lands. Each entry
+     * is removed only when ITS OWN resend is acknowledged — a single shared
+     * stash cleared on any success would let batch B's success discard batch
+     * A's still-undelivered events when two sends overlap. Total stashed
+     * events are bounded by MAX_QUEUE (oldest batches dropped first). */
+
+    /** @returns {Object<string, Array>} The pending-batch map ({} when unreadable). */
+    function readPendingMap() {
+        try {
+            var map = JSON.parse(sessionStorage.getItem(PENDING_KEY));
+            return (map && typeof map === 'object' && !Array.isArray(map)) ? map : {};
+        } catch (e) {
+            return {};
+        }
     }
 
-    /**
-     * Sends every queued event to the REST endpoint as one JSON batch.
-     *
-     * On page exit sendBeacon is preferred because it survives unload; when
-     * it reports failure (or is unavailable) a keepalive fetch is attempted.
-     * Batches that fail with a network error or 5xx are re-queued for the
-     * next flush; 4xx responses are dropped (retrying cannot fix them).
-     */
-    function flush(exiting) {
-        if (queue.length === 0) {
-            return;
+    function writePendingMap(map) {
+        try {
+            if (Object.keys(map).length === 0) {
+                sessionStorage.removeItem(PENDING_KEY);
+            } else {
+                sessionStorage.setItem(PENDING_KEY, JSON.stringify(map));
+            }
+        } catch (e) {
+            // sessionStorage blocked or full — retries last this page only.
+        }
+    }
+
+    /** Records a failed batch under its id, dropping oldest batches when the
+     *  total stashed events would exceed MAX_QUEUE. */
+    function stashBatch(id, events) {
+        var map = readPendingMap();
+        map[id] = events;
+
+        var ids = Object.keys(map);
+        var total = 0;
+        for (var i = 0; i < ids.length; i++) {
+            total += map[ids[i]].length;
+        }
+        while (total > MAX_QUEUE && ids.length > 1) {
+            var oldest = ids.shift();
+            total -= map[oldest].length;
+            delete map[oldest];
         }
 
-        var batch = queue.splice(0, queue.length);
-        var body = JSON.stringify({ events: batch });
+        writePendingMap(map);
+    }
+
+    /** Removes one acknowledged batch — and only that batch — from the map. */
+    function unstashBatch(id) {
+        var map = readPendingMap();
+        if (map[id]) {
+            delete map[id];
+            writePendingMap(map);
+        }
+    }
+
+    /** Batch ids in flight right now, so a slow retry isn't sent twice. */
+    var inFlight = {};
+
+    /**
+     * Sends one batch under its id. On page exit sendBeacon is preferred
+     * because it survives unload (an accepted hand-off counts as delivered);
+     * otherwise a keepalive fetch runs. A network error or 5xx stashes the
+     * batch under its id for later resend; 2xx — and 4xx, which retrying
+     * cannot fix — remove it.
+     */
+    function sendBatch(id, events, exiting) {
+        var body = JSON.stringify({ events: events });
+
+        inFlight[id] = true;
 
         if (exiting && navigator.sendBeacon) {
             var accepted = false;
@@ -265,6 +362,8 @@
                 accepted = false;
             }
             if (accepted) {
+                unstashBatch(id);
+                delete inFlight[id];
                 return;
             }
             // Beacon refused the payload — fall through to a keepalive fetch.
@@ -279,21 +378,48 @@
                 keepalive: true
             }).then(function (response) {
                 if (!response.ok && response.status >= 500) {
-                    requeue(batch);
+                    stashBatch(id, events);
+                } else {
+                    unstashBatch(id);
                 }
+                delete inFlight[id];
             }).catch(function () {
-                requeue(batch);
+                stashBatch(id, events);
+                delete inFlight[id];
             });
         } catch (e) {
-            requeue(batch);
+            stashBatch(id, events);
+            delete inFlight[id];
         }
     }
 
+    /**
+     * Sends the queued events as a new batch and resends any stashed batches
+     * (each under its original id) — including batches left behind by a
+     * previous page in this tab.
+     */
+    function flush(exiting) {
+        var map = readPendingMap();
+        for (var id in map) {
+            if (Object.prototype.hasOwnProperty.call(map, id) && !inFlight[id]) {
+                sendBatch(id, map[id], exiting);
+            }
+        }
+
+        if (queue.length === 0) {
+            return;
+        }
+
+        // 'b' prefix: purely-numeric keys would be reordered by the JS
+        // engine, breaking oldest-first eviction in stashBatch().
+        sendBatch('b' + randomHex(12), queue.splice(0, queue.length), exiting);
+    }
+
     /* ------------------------------------------------------------------ *
-     *  Page views — carry the landing URL's campaign attribution
+     *  Page views — carry the session's campaign attribution
      * ------------------------------------------------------------------ */
 
-    track('pageview', CAMPAIGN);
+    track('pageview', sessionCampaign(sessionId()));
 
     /* ------------------------------------------------------------------ *
      *  Clicks — links, buttons, and role="button" elements

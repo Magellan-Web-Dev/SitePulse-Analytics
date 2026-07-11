@@ -6,6 +6,7 @@ namespace SitePulseAnalytics\Admin;
 if (!defined('ABSPATH')) exit;
 
 use SitePulseAnalytics\Database\Reports;
+use SitePulseAnalytics\Tracking\RestController;
 
 /**
  * The top-level "SitePulse" admin page that visualizes collected analytics.
@@ -47,7 +48,7 @@ final class DashboardPage
     {
         add_menu_page(
             'SitePulse Analytics',
-            'SitePulse',
+            'SitePulse Analytics',
             'manage_options',
             self::MENU_SLUG,
             [self::class, 'render'],
@@ -100,6 +101,7 @@ final class DashboardPage
         echo '<div class="wrap spa-wrap">';
         echo '<h1>SitePulse Analytics</h1>';
 
+        self::maybeRenderRateLimitNotice();
         self::renderPeriodFilter($days);
         self::renderSummaryCards($totals);
         self::renderPageviewChart($daily, $days);
@@ -117,6 +119,26 @@ final class DashboardPage
         self::renderRecentEvents();
 
         echo '</div>';
+    }
+
+    /**
+     * Warns when the site-wide ingestion rate limit was hit in the last 24
+     * hours — events were dropped, so the numbers below may undercount.
+     *
+     * @return void
+     */
+    private static function maybeRenderRateLimitNotice(): void
+    {
+        $hitAt = (int) get_transient(RestController::RATE_LIMITED_FLAG);
+        if ($hitAt <= 0) {
+            return;
+        }
+
+        echo '<div class="notice notice-warning"><p><strong>SitePulse Analytics:</strong> '
+            . 'The site-wide event rate limit was reached in the last 24 hours (first at '
+            . esc_html(gmdate('Y-m-d H:i', $hitAt)) . ' UTC), so some visitor events were not recorded. '
+            . 'If this is legitimate traffic rather than a flood, raise the limits with the '
+            . '<code>spa_rate_limits</code> filter.</p></div>';
     }
 
     /**
@@ -411,7 +433,7 @@ final class DashboardPage
 
         foreach ($rows as $row) {
             echo '<tr>';
-            echo '<td>' . esc_html($row['utm_source']) . '</td>';
+            echo '<td>' . esc_html($row['utm_source'] !== '' ? $row['utm_source'] : '—') . '</td>';
             echo '<td>' . esc_html($row['utm_medium'] !== '' ? $row['utm_medium'] : '—') . '</td>';
             echo '<td>' . esc_html($row['utm_campaign'] !== '' ? $row['utm_campaign'] : '—') . '</td>';
             echo '<td>' . esc_html(number_format_i18n($row['views'])) . '</td>';

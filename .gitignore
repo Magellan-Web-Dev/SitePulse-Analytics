@@ -1,0 +1,9 @@
+# macOS Finder metadata — must never ship in a release.
+.DS_Store
+
+# Editor/IDE state.
+.vscode/
+.idea/
+
+# Local Claude Code settings.
+.claude/settings.local.json

@@ -14,18 +14,26 @@ if (!defined('WP_UNINSTALL_PLUGIN')) {
 
 global $wpdb;
 
-// Custom analytics events table.
+// Custom analytics events and webhook delivery log tables.
 $wpdb->query("DROP TABLE IF EXISTS {$wpdb->prefix}spa_events");
+$wpdb->query("DROP TABLE IF EXISTS {$wpdb->prefix}spa_webhook_deliveries");
 
-// Plugin options.
+// Plugin options ('spa_webhook_log' is the pre-1.1.0 rolling log).
 delete_option('spa_settings');
 delete_option('spa_db_version');
+delete_option('spa_delivery_db_version');
+delete_option('spa_delivery_api_active');
+delete_option('spa_delivery_api_key');
+delete_option('spa_delivery_api_key_hash');
 delete_option('spa_webhook_last_sent');
 delete_option('spa_webhook_retry_state');
 delete_option('spa_webhook_log');
 
 // Cached GitHub release data.
 delete_site_transient('spa_github_release');
+
+// Rate-limit warning flag (would otherwise expire on its own within a day).
+delete_transient('spa_rate_limited_at');
 
 // Scheduled cron events, including any pending single-event delivery retries.
 wp_clear_scheduled_hook('spa_cleanup_old_events');

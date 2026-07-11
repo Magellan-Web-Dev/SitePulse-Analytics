@@ -285,7 +285,12 @@ final class Reports
 
     /**
      * Top campaigns within a range, from the utm_* fields captured on
-     * pageview events.
+     * pageview events. The tracker attributes a whole session to its landing
+     * campaign, so these are session-attributed pageviews, not just tagged
+     * landings.
+     *
+     * A row qualifies when *any* campaign field is set — URLs tagged with
+     * only utm_campaign or utm_medium still represent campaign traffic.
      *
      * @param string $start UTC datetime (inclusive).
      * @param string $end   UTC datetime (exclusive).
@@ -301,7 +306,8 @@ final class Reports
             $wpdb->prepare(
                 "SELECT utm_source, utm_medium, utm_campaign, COUNT(*) AS views
                  FROM {$table}
-                 WHERE event_type = 'pageview' AND utm_source <> ''
+                 WHERE event_type = 'pageview'
+                   AND (utm_source <> '' OR utm_medium <> '' OR utm_campaign <> '')
                    AND created_at >= %s AND created_at < %s
                  GROUP BY utm_source, utm_medium, utm_campaign
                  ORDER BY views DESC

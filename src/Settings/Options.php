@@ -44,8 +44,13 @@ final class Options
             'respect_dnt'        => false,
             'retention_days'     => 90,
             'hover_dwell_ms'     => 800,
-            'webhook_urls'       => [],
+            'webhook_active'     => true,
+            'webhooks'           => [],
             'webhook_interval'   => 'daily',
+            'client_first_name'  => '',
+            'client_last_name'   => '',
+            'client_id'          => '',
+            'website_id'         => '',
         ];
     }
 
@@ -127,6 +132,14 @@ final class Options
      */
     public static function allowedHosts(): array
     {
+        // Memoized: the REST endpoint consults this once per event in a
+        // batch, and the URLs it derives from cannot change mid-request.
+        static $allowed = null;
+
+        if ($allowed !== null) {
+            return $allowed;
+        }
+
         $hosts = array_values(array_unique(array_filter([
             strtolower((string) wp_parse_url(home_url(), PHP_URL_HOST)),
             strtolower((string) wp_parse_url(site_url(), PHP_URL_HOST)),
@@ -138,7 +151,7 @@ final class Options
          *
          * @param string[] $hosts Lowercase hostnames.
          */
-        return (array) apply_filters('spa_allowed_hosts', $hosts);
+        return $allowed = (array) apply_filters('spa_allowed_hosts', $hosts);
     }
 
     /**
@@ -164,15 +177,84 @@ final class Options
     }
 
     /**
+     * Whether webhook delivery is currently active.
+     *
+     * Toggling this off pauses new scheduled deliveries without discarding
+     * any saved endpoint configuration — matching the "Webhook Status"
+     * toggle's own description on the Settings page. Already-scheduled
+     * retry attempts (started before the toggle was flipped off) are left
+     * to run their course rather than being torn down mid-chain.
+     *
+     * @return bool
+     */
+    public static function webhooksActive(): bool
+    {
+        return !empty(self::all()['webhook_active']);
+    }
+
+    /**
+     * Returns the configured webhooks, each with its URL and optional label.
+     *
+     * Pre-1.1.0 installs stored a flat list of URLs under 'webhook_urls'
+     * (no labels); when no 'webhooks' entries are saved yet, those legacy
+     * URLs are synthesized into unlabeled entries so upgrading never loses
+     * a configured endpoint.
+     *
+     * @return array<int, array{url: string, label: string}>
+     */
+    public static function webhooks(): array
+    {
+        $all = self::all();
+        $raw = $all['webhooks'] ?? null;
+
+        if (!is_array($raw) || $raw === []) {
+            $legacy = is_array($all['webhook_urls'] ?? null) ? $all['webhook_urls'] : [];
+            $raw    = array_map(static fn(mixed $url): array => ['url' => (string) $url, 'label' => ''], $legacy);
+        }
+
+        $out = [];
+        foreach ($raw as $entry) {
+            $url = trim(is_array($entry) ? (string) ($entry['url'] ?? '') : (string) $entry);
+            if ($url === '') {
+                continue;
+            }
+
+            $out[] = [
+                'url'   => $url,
+                'label' => is_array($entry) ? trim((string) ($entry['label'] ?? '')) : '',
+            ];
+        }
+
+        return $out;
+    }
+
+    /**
      * Returns the configured webhook endpoint URLs.
      *
      * @return string[] Zero or more absolute http(s) URLs.
      */
     public static function webhookUrls(): array
     {
-        $urls = self::all()['webhook_urls'];
+        return array_values(array_unique(array_column(self::webhooks(), 'url')));
+    }
 
-        return is_array($urls) ? array_values(array_filter(array_map('strval', $urls))) : [];
+    /**
+     * The human-readable label configured for an endpoint, or '' when none
+     * was set. Used to badge Delivery Log entries so a specific endpoint is
+     * easy to spot at a glance.
+     *
+     * @param string $url Endpoint URL (exact match against saved webhooks).
+     * @return string
+     */
+    public static function webhookLabel(string $url): string
+    {
+        foreach (self::webhooks() as $webhook) {
+            if ($webhook['url'] === $url) {
+                return $webhook['label'];
+            }
+        }
+
+        return '';
     }
 
     /**
@@ -185,6 +267,50 @@ final class Options
         $interval = (string) self::all()['webhook_interval'];
 
         return in_array($interval, self::INTERVALS, true) ? $interval : 'daily';
+    }
+
+    /**
+     * The client's first name, sent as 'website_info.client.first_name' in
+     * every webhook payload. '' when not configured.
+     *
+     * @return string
+     */
+    public static function clientFirstName(): string
+    {
+        return (string) self::all()['client_first_name'];
+    }
+
+    /**
+     * The client's last name, sent as 'website_info.client.last_name' in
+     * every webhook payload. '' when not configured.
+     *
+     * @return string
+     */
+    public static function clientLastName(): string
+    {
+        return (string) self::all()['client_last_name'];
+    }
+
+    /**
+     * Optional client identifier, sent as 'website_info.client.id' in every
+     * webhook payload. '' when not configured.
+     *
+     * @return string
+     */
+    public static function clientId(): string
+    {
+        return (string) self::all()['client_id'];
+    }
+
+    /**
+     * Optional website identifier, sent as 'website_info.id' in every
+     * webhook payload. '' when not configured.
+     *
+     * @return string
+     */
+    public static function websiteId(): string
+    {
+        return (string) self::all()['website_id'];
     }
 
     /**

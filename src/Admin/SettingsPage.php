@@ -11,14 +11,17 @@ use SitePulseAnalytics\Webhook\WebhookDispatcher;
 /**
  * The "SitePulse → Settings" submenu page.
  *
- * Manages, via the WordPress Settings API:
- *  - which interaction types are tracked,
- *  - whether logged-in users are excluded,
- *  - the data retention window and hover dwell threshold,
- *  - the webhook endpoint list (one URL per line) and send interval.
+ * Manages, via the WordPress Settings API, in the order rendered on the page:
+ *  - the "Webhook Status" master toggle, a labeled, repeatable webhook
+ *    endpoint list, optional client/website identifiers sent in every
+ *    payload, and the send interval (layout ported from the Forms Webhook
+ *    Integrator plugin's settings page);
+ *  - which interaction types are tracked, whether logged-in users are
+ *    excluded, DNT/GPC handling, and the hover dwell threshold;
+ *  - the data retention window.
  *
- * Also provides a nonce-protected "Send test payload now" action and shows
- * the rolling webhook delivery log so admins can verify endpoints work.
+ * Also provides a nonce-protected "Send test payload now" action and a link
+ * to the Delivery Log page so admins can verify endpoints work.
  */
 final class SettingsPage
 {
@@ -122,28 +125,39 @@ final class SettingsPage
         $out['respect_dnt']       = !empty($input['respect_dnt']);
         $out['retention_days']    = min(365, max(7, (int) ($input['retention_days'] ?? 90)));
         $out['hover_dwell_ms']    = min(10000, max(200, (int) ($input['hover_dwell_ms'] ?? 800)));
+        $out['webhook_active']   = !empty($input['webhook_active']);
 
         $interval = (string) ($input['webhook_interval'] ?? 'daily');
         $out['webhook_interval'] = in_array($interval, Options::INTERVALS, true) ? $interval : 'daily';
 
-        // The endpoint repeater submits webhook_urls[] as an array of fields;
-        // a newline-separated string is still accepted for robustness.
-        $raw        = $input['webhook_urls'] ?? [];
-        $candidates = is_array($raw) ? $raw : (preg_split('/\r\n|\r|\n/', (string) $raw) ?: []);
+        $out['client_first_name'] = mb_substr(sanitize_text_field((string) ($input['client_first_name'] ?? '')), 0, 190);
+        $out['client_last_name']  = mb_substr(sanitize_text_field((string) ($input['client_last_name'] ?? '')), 0, 190);
+        $out['client_id']         = mb_substr(sanitize_text_field((string) ($input['client_id'] ?? '')), 0, 190);
+        $out['website_id']        = mb_substr(sanitize_text_field((string) ($input['website_id'] ?? '')), 0, 190);
 
-        $urls = [];
-        foreach ($candidates as $candidate) {
-            $candidate = trim((string) $candidate);
-            if ($candidate === '') {
+        // The webhook repeater submits webhooks[][url] / webhooks[][label].
+        $raw = is_array($input['webhooks'] ?? null) ? $input['webhooks'] : [];
+
+        $webhooks = [];
+        $seen     = [];
+        foreach ($raw as $entry) {
+            $rawUrl = trim(is_array($entry) ? (string) ($entry['url'] ?? '') : (string) $entry);
+            if ($rawUrl === '') {
                 continue;
             }
 
-            $url = esc_url_raw($candidate, ['http', 'https']);
-            if ($url !== '' && wp_http_validate_url($url)) {
-                $urls[] = $url;
+            $url = esc_url_raw($rawUrl, ['http', 'https']);
+            if ($url === '' || !wp_http_validate_url($url) || isset($seen[$url])) {
+                continue;
             }
+
+            $seen[$url] = true;
+            $webhooks[] = [
+                'url'   => $url,
+                'label' => mb_substr(sanitize_text_field((string) (is_array($entry) ? ($entry['label'] ?? '') : '')), 0, 100),
+            ];
         }
-        $out['webhook_urls'] = array_values(array_unique($urls));
+        $out['webhooks'] = $webhooks;
 
         return $out;
     }
@@ -216,16 +230,16 @@ final class SettingsPage
         echo '<form method="post" action="options.php">';
         settings_fields(self::OPTION_GROUP);
 
+        self::renderWebhookSection($settings);
         self::renderTrackingSection($settings);
         self::renderDataSection($settings);
-        self::renderWebhookSection($settings);
 
         submit_button();
         echo '</form>';
 
         self::renderTestSendButton();
         self::renderPendingRetries();
-        self::renderDeliveryLog();
+        self::renderDeliveryLogLink();
 
         echo '</div>';
     }
@@ -250,9 +264,14 @@ final class SettingsPage
 
         foreach ($pending as $retry) {
             $when = (int) ($retry['scheduled_for'] ?? 0);
-            $due  = $when > time()
-                ? 'in ' . human_time_diff(time(), $when)
-                : 'as soon as WP-Cron next runs';
+
+            if (!empty($retry['exhausted'])) {
+                $due = 'with the next scheduled send (retry chain exhausted; the frozen payload is kept and re-sent first)';
+            } elseif ($when > time()) {
+                $due = 'in ' . human_time_diff(time(), $when);
+            } else {
+                $due = 'as soon as WP-Cron next runs';
+            }
 
             printf(
                 '<li>Retry %d of %d to <code>%s</code> — next attempt %s.</li>',
@@ -337,39 +356,78 @@ final class SettingsPage
     }
 
     /**
-     * Renders the webhook endpoint list and interval selector.
+     * Renders the "Webhook Status" toggle card and the "Webhook Settings"
+     * card (labeled endpoint repeater plus the send interval), matching the
+     * layout of the Forms Webhook Integrator plugin's settings page. Like
+     * that plugin's toggle, this one is hidden until at least one endpoint
+     * URL is saved — a master switch is meaningless with nothing configured
+     * to activate.
      *
      * @param array<string, mixed> $settings Current settings.
      * @return void
      */
     private static function renderWebhookSection(array $settings): void
     {
-        $urls = is_array($settings['webhook_urls']) ? $settings['webhook_urls'] : [];
+        $webhooks = Options::webhooks();
+        if ($webhooks === []) {
+            $webhooks = [['url' => '', 'label' => '']];
+        }
+        $hasAnyUrl = (bool) array_filter(array_column($webhooks, 'url'));
 
-        echo '<h2>Webhooks</h2>';
-        echo '<p>On the schedule below, aggregated analytics are sent as a JSON <code>POST</code> to every endpoint listed. '
-            . 'Each endpoint receives the data collected since its own last successful delivery. '
-            . 'Failed webhook deliveries are retried automatically up to 5 more times over about 24 hours '
-            . '(after 5 minutes, 30 minutes, 2 hours, 6 hours, and 16 hours); no data is lost either way, since '
-            . 'an endpoint\'s next successful delivery always covers everything since its last one.</p>';
-        echo '<table class="form-table" role="presentation">';
+        echo '<div class="spa-card spa-toggle-card" id="spa-webhook-toggle-card"'
+            . ($hasAnyUrl ? '' : ' style="display:none"') . '>';
+        echo '<h2 class="spa-card-title">Webhook Status</h2>';
+        echo '<div class="spa-toggle-row">';
+        echo '<label class="spa-toggle" for="spa_webhook_active" aria-label="Toggle webhook active state">';
+        echo '<input type="checkbox" id="spa_webhook_active" name="' . esc_attr(Options::OPTION_KEY . '[webhook_active]')
+            . '" value="1" ' . checked(!empty($settings['webhook_active']), true, false) . '>';
+        echo '<span class="spa-toggle-slider" aria-hidden="true"></span>';
+        echo '</label>';
+        echo '<span class="spa-toggle-label" id="spa-webhook-toggle-label">'
+            . (!empty($settings['webhook_active']) ? 'Active' : 'Inactive') . '</span>';
+        echo '</div>';
+        echo '<p class="description">When inactive, no new scheduled deliveries are sent — saved endpoints and settings are preserved.</p>';
+        echo '</div>';
 
-        echo '<tr><th scope="row">Endpoint URLs</th><td>';
+        echo '<div class="spa-card">';
+        echo '<h2 class="spa-card-title">Webhook Settings</h2>';
+        echo '<p class="description" style="margin-bottom:14px;">Aggregated analytics are sent to every endpoint listed below on the schedule you choose. '
+            . 'Add a label so each webhook is easy to identify in the Delivery Log. '
+            . 'Each endpoint receives the data collected since its own last successful delivery, and failed deliveries are retried '
+            . 'automatically up to 5 more times over about 24 hours — no data is lost either way.</p>';
 
-        echo '<div id="spa-webhook-repeater">';
-        foreach (array_values($urls === [] ? [''] : $urls) as $i => $url) {
-            self::renderWebhookRow((string) $url, $i > 0);
+        echo '<div id="spa-webhooks-container">';
+        foreach ($webhooks as $idx => $webhook) {
+            self::renderWebhookBlock($idx, (string) $webhook['url'], (string) $webhook['label']);
         }
         echo '</div>';
 
-        echo '<p><button type="button" class="button" id="spa-add-webhook">+ Add another endpoint</button></p>';
-        echo '<p class="description">Only valid http(s) URLs are saved; empty fields are ignored. Clear every field to disable webhook sending.</p>';
+        echo '<button type="button" id="spa-add-webhook" class="button" style="margin-top:12px;">+ Add Additional URL</button>';
 
-        // Blueprint for rows the "+ Add another endpoint" button appends.
-        echo '<template id="spa-webhook-row-template">';
-        self::renderWebhookRow('', true);
-        echo '</template>';
+        echo '<hr style="border:none;border-top:1px solid #f0f0f1;margin:20px 0;">';
 
+        echo '<table class="form-table" role="presentation">';
+
+        echo '<tr><th scope="row"><label for="spa-client-first-name">Client First Name</label></th><td>';
+        echo '<input type="text" id="spa-client-first-name" class="regular-text" name="'
+            . esc_attr(Options::OPTION_KEY . '[client_first_name]') . '" value="' . esc_attr((string) $settings['client_first_name']) . '">';
+        echo '</td></tr>';
+
+        echo '<tr><th scope="row"><label for="spa-client-last-name">Client Last Name</label></th><td>';
+        echo '<input type="text" id="spa-client-last-name" class="regular-text" name="'
+            . esc_attr(Options::OPTION_KEY . '[client_last_name]') . '" value="' . esc_attr((string) $settings['client_last_name']) . '">';
+        echo '</td></tr>';
+
+        echo '<tr><th scope="row"><label for="spa-client-id">Client ID <span class="description">(optional)</span></label></th><td>';
+        echo '<input type="text" id="spa-client-id" class="regular-text" name="'
+            . esc_attr(Options::OPTION_KEY . '[client_id]') . '" value="' . esc_attr((string) $settings['client_id']) . '">';
+        echo '<p class="description">Sent as <code>website_info.client.id</code> in every webhook payload.</p>';
+        echo '</td></tr>';
+
+        echo '<tr><th scope="row"><label for="spa-website-id">Website ID <span class="description">(optional)</span></label></th><td>';
+        echo '<input type="text" id="spa-website-id" class="regular-text" name="'
+            . esc_attr(Options::OPTION_KEY . '[website_id]') . '" value="' . esc_attr((string) $settings['website_id']) . '">';
+        echo '<p class="description">Sent as <code>website_info.id</code> in every webhook payload.</p>';
         echo '</td></tr>';
 
         echo '<tr><th scope="row"><label for="spa-webhook-interval">Send interval</label></th><td>';
@@ -401,31 +459,46 @@ final class SettingsPage
 
         echo '</p>';
         echo '</td></tr>';
-
         echo '</table>';
+        echo '</div>';
     }
 
     /**
-     * Renders one endpoint row of the webhook repeater. Also used inside the
-     * <template> element that the "+ Add another endpoint" button clones.
+     * Renders one webhook block of the repeater: a URL field and an optional
+     * label field, with a Remove button on every block but the first (which
+     * is the form's permanent field — clearing it, alongside the Webhook
+     * Status toggle, is how webhook sending is disabled).
      *
-     * The first row is rendered without a Remove button — it is the form's
-     * permanent field (clearing it is how webhooks are disabled), so removing
-     * it would be meaningless. Every additional row gets one.
-     *
-     * @param string $url       Saved endpoint URL, or '' for an empty row.
-     * @param bool   $removable Whether to include the Remove button.
+     * @param int    $index Zero-based position in the repeater.
+     * @param string $url   Saved endpoint URL, or '' for an empty block.
+     * @param string $label Saved label, or '' when none was set.
      * @return void
      */
-    private static function renderWebhookRow(string $url, bool $removable): void
+    private static function renderWebhookBlock(int $index, string $url, string $label): void
     {
-        echo '<div class="spa-webhook-row">';
-        echo '<input type="url" name="' . esc_attr(Options::OPTION_KEY . '[webhook_urls][]') . '" value="' . esc_attr($url) . '" '
-            . 'class="regular-text code" placeholder="https://example.com/analytics-hook">';
+        echo '<div class="spa-webhook-block" data-webhook-index="' . esc_attr((string) $index) . '">';
 
-        if ($removable) {
-            echo '<button type="button" class="button spa-remove-webhook" aria-label="Remove this endpoint">Remove</button>';
+        echo '<div class="spa-webhook-block-header">';
+        echo '<strong class="spa-webhook-block-title">Webhook ' . esc_html((string) ($index + 1)) . '</strong>';
+        if ($index > 0) {
+            echo '<button type="button" class="button spa-remove-webhook-btn" aria-label="Remove webhook '
+                . esc_attr((string) ($index + 1)) . '">Remove</button>';
         }
+        echo '</div>';
+
+        echo '<div class="spa-webhook-url-row">';
+        echo '<input type="url" class="spa-webhook-url-input regular-text code" '
+            . 'name="' . esc_attr(Options::OPTION_KEY . '[webhooks][' . $index . '][url]') . '" '
+            . 'value="' . esc_attr($url) . '" placeholder="https://example.com/analytics-hook" '
+            . 'aria-label="Webhook ' . esc_attr((string) ($index + 1)) . ' URL">';
+        echo '</div>';
+
+        echo '<div style="margin-top:8px;">';
+        echo '<input type="text" class="regular-text spa-webhook-label-input" '
+            . 'name="' . esc_attr(Options::OPTION_KEY . '[webhooks][' . $index . '][label]') . '" '
+            . 'value="' . esc_attr($label) . '" placeholder="Label (optional — shown in the Delivery Log)" '
+            . 'aria-label="Webhook ' . esc_attr((string) ($index + 1)) . ' label">';
+        echo '</div>';
 
         echo '</div>';
     }
@@ -452,42 +525,17 @@ final class SettingsPage
     }
 
     /**
-     * Renders the rolling webhook delivery log.
+     * Renders a pointer to the Delivery Log page, which shows every attempt
+     * with its payload, response, filters, and pagination.
      *
      * @return void
      */
-    private static function renderDeliveryLog(): void
+    private static function renderDeliveryLogLink(): void
     {
-        $log = WebhookDispatcher::getLog();
+        $url = add_query_arg(['page' => DeliveryLogPage::MENU_SLUG], self_admin_url('admin.php'));
 
         echo '<h2>Delivery Log</h2>';
-        echo '<table class="wp-list-table widefat striped">';
-        echo '<thead><tr><th>When (UTC)</th><th>Endpoint</th><th>Result</th><th>HTTP</th><th>Type</th></tr></thead><tbody>';
-
-        if ($log === []) {
-            echo '<tr><td colspan="5">No webhook deliveries have been attempted yet.</td></tr>';
-        }
-
-        foreach ($log as $entry) {
-            $status = !empty($entry['ok'])
-                ? '<span style="color:#00a32a;">✔ ' . esc_html((string) ($entry['message'] ?? 'Delivered')) . '</span>'
-                : '<span style="color:#d63638;">✘ ' . esc_html((string) ($entry['message'] ?? 'Failed')) . '</span>';
-
-            $kind = match ((string) ($entry['kind'] ?? '')) {
-                'test'  => 'Test',
-                'retry' => sprintf('Retry %d/%d', (int) ($entry['attempt'] ?? 1), WebhookDispatcher::maxRetries()),
-                default => 'Scheduled',
-            };
-
-            echo '<tr>';
-            echo '<td>' . esc_html(gmdate('Y-m-d H:i:s', (int) ($entry['time'] ?? 0))) . '</td>';
-            echo '<td>' . esc_html((string) ($entry['url'] ?? '')) . '</td>';
-            echo '<td>' . $status . '</td>';
-            echo '<td>' . esc_html((string) ($entry['code'] ?? 0)) . '</td>';
-            echo '<td>' . esc_html($kind) . '</td>';
-            echo '</tr>';
-        }
-
-        echo '</tbody></table>';
+        echo '<p>Every delivery attempt — with the exact payload sent and the response received — is recorded on the '
+            . '<a href="' . esc_url($url) . '">Delivery Log</a> page.</p>';
     }
 }

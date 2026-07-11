@@ -94,20 +94,80 @@
     color: #646970;
 }
 
-/* Webhook endpoint repeater (settings page) ------------------------------ */
+/* Webhook Status toggle card + Webhook Settings repeater (settings page),
+   layout ported from the Forms Webhook Integrator plugin ------------------ */
 
-.spa-webhook-row {
+.spa-toggle-card {
+    display: flex;
+    align-items: center;
+    gap: 0;
+    flex-wrap: wrap;
+}
+
+.spa-toggle-card .spa-card-title {
+    margin-bottom: 0;
+    border-bottom: none;
+    padding-bottom: 0;
+    margin-right: 20px;
+    flex-shrink: 0;
+}
+
+.spa-toggle-card p.description {
+    flex-basis: 100%;
+    margin: 8px 0 0;
+}
+
+.spa-webhook-block {
+    background: #f6f7f7;
+    border: 1px solid #dcdcde;
+    border-radius: 4px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+}
+
+.spa-webhook-block-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 10px;
+}
+
+.spa-webhook-block-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: #1d2327;
+}
+
+.spa-remove-webhook-btn {
+    color: #d63638 !important;
+    border-color: #d63638 !important;
+    padding: 1px 10px !important;
+    height: 24px;
+    font-size: 12px;
+    line-height: 22px;
+}
+
+.spa-remove-webhook-btn:hover {
+    background: #d63638 !important;
+    color: #fff !important;
+}
+
+.spa-webhook-url-row {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 8px;
+    flex-wrap: wrap;
 }
 
-.spa-webhook-row input[type="url"] {
-    flex: 0 1 420px;
+.spa-webhook-url-input,
+.spa-webhook-label-input {
+    flex: 1;
+    min-width: 220px;
+    max-width: 420px;
 }
 
-/* About page ------------------------------------------------------------ */
+/* About page — card-per-section layout ported from the Forms Webhook
+   Integrator plugin's About page ------------------------------------------ */
 
 .spa-about h2 {
     margin-top: 32px;
@@ -132,24 +192,630 @@
     color: #50575e;
 }
 
+.spa-about-intro p {
+    font-size: 14px;
+    line-height: 1.7;
+    margin-bottom: 12px;
+}
+
+.spa-about-requirements {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px 24px;
+    list-style: none;
+    padding: 0;
+    margin: 0;
+}
+
+.spa-about-requirements li {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: #3c434a;
+}
+
+.spa-about-label {
+    display: inline-block;
+    background: #f0f0f1;
+    border: 1px solid #c3c4c7;
+    border-radius: 3px;
+    padding: 1px 8px;
+    font-size: 11px;
+    font-weight: 600;
+    color: #1d2327;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+}
+
 .spa-about-table {
+    width: 100%;
     max-width: 900px;
+    border-collapse: collapse;
+    font-size: 13px;
+    margin-top: 4px;
+}
+
+.spa-about-table th {
+    background: #f6f7f7;
+    border: 1px solid #dcdcde;
+    padding: 8px 12px;
+    text-align: left;
+    font-weight: 600;
+    color: #1d2327;
+}
+
+.spa-about-table td {
+    border: 1px solid #dcdcde;
+    padding: 8px 12px;
+    vertical-align: top;
+    color: #3c434a;
+    line-height: 1.6;
+}
+
+.spa-about-table tr:nth-child(even) td {
+    background: #fafafa;
+}
+
+.spa-about-table td:first-child,
+.spa-about-table th:first-child {
+    width: 220px;
+    white-space: nowrap;
+}
+
+.spa-about-list {
+    margin: 0;
+    padding-left: 20px;
 }
 
 .spa-about-list li {
+    font-size: 13px;
+    color: #3c434a;
+    line-height: 1.7;
     margin-bottom: 6px;
 }
 
 .spa-about-code {
-    background: #fff;
-    border: 1px solid #dcdcde;
-    border-radius: 8px;
-    padding: 16px;
-    max-width: 900px;
+    background: #1d2327;
+    color: #e2e4e7;
+    border-radius: 4px;
+    padding: 14px 18px;
+    font-family: Consolas, Monaco, "Courier New", monospace;
+    font-size: 12.5px;
+    line-height: 1.65;
     overflow-x: auto;
+    margin: 12px 0;
+    white-space: pre;
+    max-width: 900px;
 }
 
 .spa-about-code code {
     background: transparent;
     padding: 0;
+    color: inherit;
+}
+
+.spa-about-note {
+    background: #f0f6fc;
+    border-left: 4px solid #2271b1;
+    border-radius: 0 4px 4px 0;
+    padding: 10px 14px;
+    font-size: 13px;
+    color: #3c434a;
+    line-height: 1.6;
+    margin: 14px 0;
+}
+
+.spa-about-subheading {
+    font-size: 13px;
+    font-weight: 600;
+    color: #1d2327;
+    margin: 20px 0 4px;
+}
+
+/* Delivery Log — webhook label badge ------------------------------------- */
+
+.spa-log-webhook-label {
+    display: inline-block;
+    padding: 1px 8px;
+    background: #e8f0fb;
+    border: 1px solid #b3c8f0;
+    border-radius: 3px;
+    color: #2271b1;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+/* ==========================================================================
+   Delivery Log page — layout ported from the Forms Webhook Integrator
+   plugin's analytics page so both screens share one look.
+   ========================================================================== */
+
+/* ── Card ─────────────────────────────────────────────────────────────────── */
+
+.spa-delivery-wrap .spa-card {
+    border-color: #c3c4c7;
+    border-radius: 4px;
+    padding: 20px 24px;
+    margin-bottom: 20px;
+}
+
+.spa-card-title {
+    margin-top: 0;
+    margin-bottom: 16px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #1d2327;
+    border-bottom: 1px solid #f0f0f1;
+    padding-bottom: 12px;
+}
+
+.spa-api-key-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.spa-api-key-row code {
+    word-break: break-all;
+}
+
+/* ── Toggle Switch ────────────────────────────────────────────────────────── */
+
+.spa-toggle-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.spa-toggle {
+    position: relative;
+    display: inline-block;
+    width: 52px;
+    height: 28px;
+    flex-shrink: 0;
+    cursor: pointer;
+}
+
+.spa-toggle input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+    position: absolute;
+}
+
+.spa-toggle-slider {
+    position: absolute;
+    inset: 0;
+    background-color: #c3c4c7;
+    border-radius: 28px;
+    transition: background-color 0.25s ease;
+}
+
+.spa-toggle-slider::before {
+    content: '';
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    left: 4px;
+    top: 4px;
+    background-color: #fff;
+    border-radius: 50%;
+    transition: transform 0.25s ease;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+
+.spa-toggle input:checked + .spa-toggle-slider {
+    background-color: #2271b1;
+}
+
+.spa-toggle input:checked + .spa-toggle-slider::before {
+    transform: translateX(24px);
+}
+
+.spa-toggle input:focus-visible + .spa-toggle-slider {
+    outline: 2px solid #2271b1;
+    outline-offset: 2px;
+}
+
+.spa-toggle-label {
+    font-weight: 600;
+    font-size: 13px;
+    color: #1d2327;
+    min-width: 52px;
+}
+
+/* ── Toolbar ──────────────────────────────────────────────────────────────── */
+
+.spa-retention-notice {
+    margin-bottom: 16px !important;
+}
+
+.spa-delivery-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 20px;
+}
+
+.spa-delivery-toolbar .spa-clear-form {
+    margin: 0;
+}
+
+.spa-export-buttons {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.spa-btn-danger {
+    color: #d63638 !important;
+    border-color: #d63638 !important;
+}
+
+.spa-btn-danger:hover {
+    background: #d63638 !important;
+    color: #fff !important;
+}
+
+/* ── Accordion ────────────────────────────────────────────────────────────── */
+
+.spa-accordion {
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-radius: 4px;
+    margin-bottom: 20px;
+    box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
+    overflow: hidden;
+}
+
+.spa-accordion-header {
+    width: 100%;
+    background: #f6f7f7;
+    border: none;
+    border-bottom: 1px solid #c3c4c7;
+    padding: 14px 20px;
+    text-align: left;
+    font-size: 14px;
+    font-weight: 600;
+    color: #1d2327;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    transition: background-color 0.15s ease;
+}
+
+.spa-accordion-header:hover {
+    background: #ececec;
+}
+
+.spa-accordion-header[aria-expanded="true"] {
+    background: #fff;
+}
+
+.spa-accordion-title {
+    flex: 1;
+}
+
+.spa-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 26px;
+    height: 22px;
+    padding: 0 7px;
+    background: #2271b1;
+    color: #fff;
+    border-radius: 11px;
+    font-size: 12px;
+    font-weight: 700;
+    flex-shrink: 0;
+}
+
+.spa-badge-error {
+    background: #d63638;
+}
+
+.spa-accordion-arrow {
+    font-size: 10px;
+    color: #757575;
+    flex-shrink: 0;
+    transition: transform 0.2s ease;
+}
+
+.spa-accordion-header[aria-expanded="true"] .spa-accordion-arrow {
+    transform: rotate(180deg);
+}
+
+.spa-accordion-body {
+    padding: 16px 20px;
+}
+
+/* ── Log Entries ──────────────────────────────────────────────────────────── */
+
+.spa-log-list {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+}
+
+.spa-log-item {
+    border: 1px solid #dcdcde;
+    border-left-width: 4px;
+    border-radius: 4px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+    font-size: 13px;
+    line-height: 1.5;
+}
+
+.spa-log-error {
+    border-left-color: #d63638;
+    background: #fff8f8;
+}
+
+.spa-log-success {
+    border-left-color: #00a32a;
+    background: #f7fef7;
+}
+
+.spa-log-meta {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 8px;
+    flex-wrap: wrap;
+}
+
+.spa-log-time {
+    color: #757575;
+    font-size: 12px;
+    flex-shrink: 0;
+}
+
+.spa-log-kind-label {
+    display: inline-block;
+    padding: 1px 8px;
+    background: #e8f0fb;
+    border: 1px solid #b3c8f0;
+    border-radius: 3px;
+    color: #2271b1;
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+.spa-log-status {
+    padding: 2px 8px;
+    border-radius: 3px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    flex-shrink: 0;
+}
+
+.spa-log-status.error {
+    background: #d63638;
+    color: #fff;
+}
+
+.spa-log-status.success {
+    background: #00a32a;
+    color: #fff;
+}
+
+.spa-log-delete-btn {
+    margin-left: auto;
+    flex-shrink: 0;
+    padding: 1px 8px !important;
+    height: 22px;
+    font-size: 12px;
+    line-height: 20px;
+    color: #d63638 !important;
+    border-color: #d63638 !important;
+}
+
+.spa-log-delete-btn:hover {
+    background: #d63638 !important;
+    color: #fff !important;
+}
+
+.spa-log-url {
+    margin-bottom: 6px;
+    word-break: break-all;
+}
+
+.spa-log-url code {
+    font-size: 12px;
+    background: #f0f0f1;
+    padding: 1px 5px;
+    border-radius: 2px;
+}
+
+.spa-log-error-msg {
+    color: #d63638;
+    margin-bottom: 8px;
+    font-weight: 500;
+}
+
+.spa-log-data,
+.spa-log-response {
+    margin-bottom: 6px;
+}
+
+.spa-log-data pre,
+.spa-log-response pre {
+    background: #f6f7f7;
+    border: 1px solid #dcdcde;
+    border-radius: 3px;
+    padding: 8px 10px;
+    margin: 4px 0 0;
+    overflow-x: auto;
+    font-size: 12px;
+    max-height: 160px;
+    overflow-y: auto;
+    white-space: pre-wrap;
+    word-break: break-word;
+}
+
+.spa-empty-msg {
+    color: #757575;
+    font-style: italic;
+    padding: 6px 0;
+    font-size: 13px;
+}
+
+/* ── Accordion Controls (filters + per-page) ──────────────────────────────── */
+
+.spa-acc-controls {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 10px 0 14px;
+    border-bottom: 1px solid #f0f0f1;
+    margin-bottom: 14px;
+}
+
+.spa-acc-filters {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.spa-acc-search {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+}
+
+.spa-search-input {
+    font-size: 13px;
+    padding: 4px 8px;
+    border: 1px solid #c3c4c7;
+    border-radius: 3px;
+    background: #fff;
+    color: #1d2327;
+    width: 200px;
+}
+
+.spa-search-input:focus {
+    border-color: #2271b1;
+    outline: none;
+    box-shadow: 0 0 0 1px #2271b1;
+}
+
+.spa-search-clear {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    border: 1px solid #c3c4c7;
+    border-radius: 3px;
+    background: #fff;
+    color: #50575e;
+    font-size: 12px;
+    cursor: pointer;
+    flex-shrink: 0;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.spa-search-clear:hover {
+    background: #f0f0f1;
+    border-color: #a0a0a8;
+    color: #1d2327;
+}
+
+.spa-acc-filters select,
+.spa-acc-perpage select {
+    font-size: 13px;
+    padding: 4px 6px;
+    border: 1px solid #c3c4c7;
+    border-radius: 3px;
+    background: #fff;
+    color: #1d2327;
+    cursor: pointer;
+}
+
+.spa-acc-perpage label {
+    font-size: 13px;
+    color: #50575e;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+}
+
+/* ── Pagination ───────────────────────────────────────────────────────────── */
+
+.spa-pagination {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    gap: 10px;
+    padding: 14px 0 4px;
+    border-top: 1px solid #f0f0f1;
+    margin-top: 10px;
+}
+
+.spa-page-info {
+    font-size: 13px;
+    color: #50575e;
+}
+
+.spa-page-buttons {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+}
+
+.spa-page-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 30px;
+    height: 28px;
+    padding: 0 8px;
+    border: 1px solid #c3c4c7;
+    border-radius: 3px;
+    background: #fff;
+    color: #1d2327;
+    font-size: 13px;
+    cursor: pointer;
+    line-height: 1;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.spa-page-btn:hover {
+    background: #f0f0f1;
+    border-color: #a0a0a8;
+}
+
+.spa-page-btn-active {
+    background: #2271b1;
+    border-color: #2271b1;
+    color: #fff;
+    font-weight: 700;
+    pointer-events: none;
+}
+
+.spa-page-ellipsis {
+    font-size: 13px;
+    color: #757575;
+    padding: 0 4px;
+    line-height: 28px;
 }

@@ -58,6 +58,9 @@ final class RestController
     /** @var string Object-cache group for rate-limit counters. */
     private const CACHE_GROUP = 'spa_rate_limit';
 
+    /** @var string Transient flagging that the site-wide rate limit was hit (read by the dashboard). */
+    public const RATE_LIMITED_FLAG = 'spa_rate_limited_at';
+
     /** @var string[] Campaign parameters extracted from pageview events into dedicated columns. */
     private const CAMPAIGN_PARAMS = ['utm_source', 'utm_medium', 'utm_campaign'];
 
@@ -109,6 +112,12 @@ final class RestController
             return new \WP_REST_Response(['stored' => 0], 202);
         }
 
+        // The tracker never starts for DNT/GPC visitors when the option is on;
+        // enforcing it here too covers senders that bypass the tracker.
+        if (Options::respectDnt() && self::sendsPrivacySignal($request)) {
+            return new \WP_REST_Response(['stored' => 0], 202);
+        }
+
         // Crawlers that execute JS would otherwise pollute every metric.
         // Accept-and-discard so bots see nothing worth probing.
         if (self::isBot()) {
@@ -129,20 +138,34 @@ final class RestController
         }
 
         $device = wp_is_mobile() ? 'mobile' : 'desktop';
-        $stored = 0;
+        $batch  = [];
 
         foreach ($events as $event) {
             $sanitized = self::sanitizeEvent($event, $device);
-            if ($sanitized === null) {
-                continue;
-            }
-
-            if (DatabaseManager::insertEvent($sanitized['type'], $sanitized['data'])) {
-                $stored++;
+            if ($sanitized !== null) {
+                $batch[] = $sanitized;
             }
         }
 
+        // One multi-row INSERT instead of one query per event.
+        $stored = DatabaseManager::insertEvents($batch);
+
         return new \WP_REST_Response(['stored' => $stored], 202);
+    }
+
+    /**
+     * Whether the request carries a Do Not Track or Global Privacy Control
+     * header. Only consulted when the site owner enabled the privacy-signal
+     * option — DNT/GPC is honored as an opt-out, not treated as consent.
+     *
+     * @param \WP_REST_Request $request The incoming request.
+     * @return bool
+     */
+    private static function sendsPrivacySignal(\WP_REST_Request $request): bool
+    {
+        return $request->get_header('dnt') === '1'
+            || $request->get_header('sec_gpc') === '1'
+            || $request->get_header('sec-gpc') === '1';
     }
 
     /**
@@ -183,15 +206,31 @@ final class RestController
             'device'        => $device,
         ];
 
-        // Campaign attribution is a property of the page view that landed the
-        // visitor; other event types never carry it.
+        // Campaign attribution rides on pageview events (the tracker attaches
+        // the session's campaign to each one); other event types never carry it.
         if ($type === 'pageview') {
             foreach (self::CAMPAIGN_PARAMS as $param) {
-                $data[$param] = self::scalarString($event[$param] ?? '');
+                $data[$param] = self::campaignValue(self::scalarString($event[$param] ?? ''));
             }
         }
 
         return ['type' => $type, 'data' => $data];
+    }
+
+    /**
+     * Filters one campaign (utm_*) value before storage.
+     *
+     * Campaign values are meant to be labels like "spring-sale", but nothing
+     * stops a mailer from interpolating the recipient's address into a UTM
+     * parameter — that would be PII, so any value containing an email-like
+     * "@" is dropped rather than stored.
+     *
+     * @param string $value Raw campaign parameter value.
+     * @return string The value, or '' when it looks like it contains an email.
+     */
+    private static function campaignValue(string $value): string
+    {
+        return str_contains($value, '@') ? '' : $value;
     }
 
     /**
@@ -210,11 +249,14 @@ final class RestController
     }
 
     /**
-     * Normalizes a tracked page URL: the host must belong to this site, and
-     * the URL is canonicalized to scheme://host/path — the entire query
-     * string is discarded (campaign parameters travel as separate utm_*
-     * fields), so tokens and PII never reach the database and one page is
-     * never fragmented across many report rows.
+     * Normalizes a tracked page URL: the scheme must be http(s), the host
+     * must belong to this site, and the URL is canonicalized to
+     * scheme://host/path — the entire query string is discarded (campaign
+     * parameters travel as separate utm_* fields), so tokens and PII never
+     * reach the database and one page is never fragmented across many report
+     * rows. A port survives only when it matches one this site actually runs
+     * on, so a fabricated ftp://example.com:1234/page can neither pass nor
+     * fork report rows.
      *
      * The tracker performs the same normalization client-side; repeating it
      * here means a hand-crafted request cannot smuggle foreign URLs or
@@ -230,23 +272,50 @@ final class RestController
             return '';
         }
 
+        $scheme = strtolower((string) ($parts['scheme'] ?? ''));
+        if ($scheme !== 'http' && $scheme !== 'https') {
+            return '';
+        }
+
         if (!in_array(strtolower((string) $parts['host']), Options::allowedHosts(), true)) {
             return '';
         }
 
-        return (($parts['scheme'] ?? 'https')) . '://' . $parts['host']
-            . (isset($parts['port']) ? ':' . (int) $parts['port'] : '')
-            . ($parts['path'] ?? '/');
+        $port = isset($parts['port']) && in_array((int) $parts['port'], self::sitePorts(), true)
+            ? ':' . (int) $parts['port']
+            : '';
+
+        return $scheme . '://' . $parts['host'] . $port . ($parts['path'] ?? '/');
+    }
+
+    /**
+     * The non-default ports this site itself is served on (from home_url()
+     * and site_url()). Usually empty; non-empty on e.g. local dev setups.
+     *
+     * @return int[]
+     */
+    private static function sitePorts(): array
+    {
+        static $ports = null;
+
+        if ($ports === null) {
+            $ports = array_values(array_filter(array_map(
+                static fn(string $url): int => (int) wp_parse_url($url, PHP_URL_PORT),
+                [home_url(), site_url()]
+            )));
+        }
+
+        return $ports;
     }
 
     /**
      * Normalizes a click/form destination URL.
      *
      * mailto: and tel: destinations are kept whole (the address *is* the
-     * destination), script/data URIs are dropped, and every http(s) or
-     * relative URL loses its query string and fragment — link and form-action
-     * URLs can carry reset tokens, emails, or order ids that must never be
-     * stored.
+     * destination — note this means those values are stored); every other
+     * scheme except http(s) is dropped, and http(s) and relative URLs lose
+     * their query string and fragment — link and form-action URLs can carry
+     * reset tokens, emails, or order ids that must never be stored.
      *
      * @param string $url Raw destination from the event.
      * @return string Normalized destination, or '' when empty or unsafe.
@@ -261,13 +330,15 @@ final class RestController
             return $url;
         }
 
-        if (preg_match('~^(javascript|data|vbscript):~i', $url)) {
+        // Any other explicit scheme that isn't http(s) — javascript:, data:,
+        // ftp:, custom app schemes — is dropped rather than stored.
+        if (preg_match('~^([a-z][a-z0-9+.\-]*):~i', $url, $m) && !in_array(strtolower($m[1]), ['http', 'https'], true)) {
             return '';
         }
 
         $parts = wp_parse_url($url);
         if (is_array($parts) && !empty($parts['host'])) {
-            return (($parts['scheme'] ?? 'https')) . '://' . $parts['host']
+            return strtolower((string) ($parts['scheme'] ?? 'https')) . '://' . $parts['host']
                 . (isset($parts['port']) ? ':' . (int) $parts['port'] : '')
                 . ($parts['path'] ?? '/');
         }
@@ -279,7 +350,9 @@ final class RestController
     /**
      * Normalizes a referrer URL to scheme://host/path — query strings and
      * fragments can carry search terms, emails, or tokens, so they are never
-     * stored. Any host is allowed (external referrers are the interesting ones).
+     * stored. Any host is allowed (external referrers are the interesting
+     * ones), but the scheme must be http(s) — browsers only ever populate
+     * document.referrer with web URLs, so anything else is fabricated.
      *
      * @param string $url Raw referrer from the event.
      * @return string Normalized referrer, or '' when unparsable.
@@ -295,7 +368,12 @@ final class RestController
             return '';
         }
 
-        return (($parts['scheme'] ?? 'https')) . '://' . $parts['host'] . ($parts['path'] ?? '/');
+        $scheme = strtolower((string) ($parts['scheme'] ?? ''));
+        if ($scheme !== 'http' && $scheme !== 'https') {
+            return '';
+        }
+
+        return $scheme . '://' . $parts['host'] . ($parts['path'] ?? '/');
     }
 
     /**
@@ -367,6 +445,14 @@ final class RestController
             || self::chargeBucket('spa_rl_' . md5($ip), $events, $limits['per_ip']);
 
         $siteAllowed = self::chargeBucket('spa_rl_site', $events, $limits['site_wide']);
+
+        // Hitting the site-wide cap means legitimate events may be dropped —
+        // surface that on the dashboard instead of failing silently. The
+        // guard keeps a sustained flood from rewriting the transient on
+        // every rejected request.
+        if (!$siteAllowed && get_transient(self::RATE_LIMITED_FLAG) === false) {
+            set_transient(self::RATE_LIMITED_FLAG, time(), DAY_IN_SECONDS);
+        }
 
         return $ipAllowed && $siteAllowed;
     }

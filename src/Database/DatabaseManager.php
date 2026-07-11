@@ -101,15 +101,21 @@ final class DatabaseManager
         }
     }
 
+    /** @var string[] Insertable columns, in the order bulk inserts serialize them. */
+    private const COLUMNS = [
+        'event_type', 'page_url', 'page_title', 'element_tag', 'element_label',
+        'target_url', 'event_value', 'referrer', 'session_id', 'device',
+        'utm_source', 'utm_medium', 'utm_campaign', 'created_at',
+    ];
+
+    /** @var int Rows deleted per statement during retention cleanup. */
+    private const CLEANUP_CHUNK = 5000;
+
+    /** @var int Maximum delete chunks per cron run, so one request can't run indefinitely. */
+    private const CLEANUP_MAX_CHUNKS = 40;
+
     /**
      * Inserts a single event row.
-     *
-     * All string fields are sanitized and truncated to their column widths
-     * here so every write path (REST endpoint, spa_track_event(), future
-     * importers) shares one source of truth for column limits.
-     *
-     * The row passes through the 'spa_tracked_event' filter before insertion;
-     * returning a falsy value from that filter drops the event.
      *
      * @param string               $type Event type key (e.g. "pageview", "click").
      * @param array<string, mixed> $data Event context; see the column list in createTable().
@@ -117,11 +123,73 @@ final class DatabaseManager
      */
     public static function insertEvent(string $type, array $data): bool
     {
+        return self::insertEvents([['type' => $type, 'data' => $data]]) === 1;
+    }
+
+    /**
+     * Inserts a batch of events with a single multi-row INSERT.
+     *
+     * The REST endpoint accepts up to 25 events per request; writing them in
+     * one statement instead of one query per event keeps ingestion cheap on
+     * busy sites.
+     *
+     * @param array<int, array{type: string, data: array<string, mixed>}> $events Events to insert.
+     * @return int Number of rows inserted.
+     */
+    public static function insertEvents(array $events): int
+    {
         global $wpdb;
 
+        $rows = [];
+        foreach ($events as $event) {
+            $row = self::sanitizeRow((string) ($event['type'] ?? ''), (array) ($event['data'] ?? []));
+            if ($row !== null) {
+                $rows[] = $row;
+            }
+        }
+
+        if ($rows === []) {
+            return 0;
+        }
+
+        $columns      = '`' . implode('`, `', self::COLUMNS) . '`';
+        $placeholders = '(' . implode(', ', array_fill(0, count(self::COLUMNS), '%s')) . ')';
+        $values       = [];
+
+        foreach ($rows as $row) {
+            foreach (self::COLUMNS as $column) {
+                $values[] = $row[$column];
+            }
+        }
+
+        $inserted = $wpdb->query($wpdb->prepare(
+            'INSERT INTO ' . self::tableName() . " ({$columns}) VALUES "
+                . implode(', ', array_fill(0, count($rows), $placeholders)),
+            $values
+        ));
+
+        return is_int($inserted) ? $inserted : 0;
+    }
+
+    /**
+     * Validates, sanitizes, and truncates one event into a storable row.
+     *
+     * All string fields are cut to their column widths here so every write
+     * path (REST endpoint, spa_track_event(), future importers) shares one
+     * source of truth for column limits.
+     *
+     * The row passes through the 'spa_tracked_event' filter before insertion;
+     * returning a falsy value from that filter drops the event.
+     *
+     * @param string               $type Event type key (e.g. "pageview", "click").
+     * @param array<string, mixed> $data Event context; see the column list in createTable().
+     * @return array<string, string>|null The row, or null when invalid or dropped.
+     */
+    private static function sanitizeRow(string $type, array $data): ?array
+    {
         $type = sanitize_key($type);
         if ($type === '' || strlen($type) > 20) {
-            return false;
+            return null;
         }
 
         $row = [
@@ -149,17 +217,28 @@ final class DatabaseManager
          */
         $row = apply_filters('spa_tracked_event', $row, $type);
         if (!is_array($row)) {
-            return false;
+            return null;
         }
 
-        return (bool) $wpdb->insert(self::tableName(), $row, array_fill(0, count($row), '%s'));
+        // Bulk inserts serialize rows by the fixed column list, so a filter
+        // that removed or renamed keys must not shift another row's values.
+        $normalized = [];
+        foreach (self::COLUMNS as $column) {
+            $normalized[$column] = (string) ($row[$column] ?? '');
+        }
+
+        return $normalized;
     }
 
     /**
      * Deletes rows older than the configured retention window.
      *
      * Runs daily via the spa_cleanup_old_events cron event. Timestamps are
-     * stored in UTC, so the cutoff is computed with gmdate().
+     * stored in UTC, so the cutoff is computed with gmdate(). Deletion runs
+     * in bounded chunks — one giant DELETE on a large table can hold locks
+     * for seconds and stall replication — and the chunks per run are capped,
+     * so a huge backlog is worked off across successive daily runs instead
+     * of pinning one request indefinitely.
      *
      * @return void
      */
@@ -169,10 +248,17 @@ final class DatabaseManager
 
         $cutoff = gmdate('Y-m-d H:i:s', time() - Options::retentionDays() * DAY_IN_SECONDS);
         $table  = self::tableName();
+        $runs   = 0;
 
-        $wpdb->query(
-            $wpdb->prepare("DELETE FROM {$table} WHERE created_at < %s", $cutoff)
-        );
+        do {
+            $deleted = $wpdb->query(
+                $wpdb->prepare(
+                    "DELETE FROM {$table} WHERE created_at < %s LIMIT %d",
+                    $cutoff,
+                    self::CLEANUP_CHUNK
+                )
+            );
+        } while (is_int($deleted) && $deleted === self::CLEANUP_CHUNK && ++$runs < self::CLEANUP_MAX_CHUNKS);
     }
 
     /**
