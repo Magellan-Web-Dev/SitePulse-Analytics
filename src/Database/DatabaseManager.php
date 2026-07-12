@@ -233,7 +233,13 @@ final class DatabaseManager
         }
 
         if ($row['channel'] === '' && ($type === 'pageview' || $type === 'form_success')) {
-            $row['channel'] = self::truncate(Channels::classify($row, $type), 24);
+            // session_referrer — the referrer the session entered through,
+            // persisted by the tracker — feeds classification only; it is
+            // not a stored column, so it never reaches the INSERT.
+            $context = $row;
+            $context['session_referrer'] = self::truncate(esc_url_raw((string) ($data['session_referrer'] ?? '')), 255);
+
+            $row['channel'] = self::truncate(Channels::classify($context, $type), 24);
         }
 
         /**

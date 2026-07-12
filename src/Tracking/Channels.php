@@ -106,12 +106,14 @@ final class Channels
      * Derives the marketing channel for one event row.
      *
      * Precedence: ad-click identifier (unambiguous), then utm_medium/source
-     * conventions, then — for untagged traffic — the referrer. Untagged
-     * pageviews with an internal referrer return '' (mid-session navigation,
-     * not an entrance); a conversion in the same situation falls back to
-     * Direct so every conversion carries a channel.
+     * conventions, then — for untagged traffic — the referrer, falling back
+     * to the session's entrance referrer (session_referrer, persisted by the
+     * tracker) when the event's own referrer is internal or missing. Untagged
+     * pageviews with an internal referrer and no session referrer return ''
+     * (mid-session navigation, not an entrance); a conversion in the same
+     * situation falls back to Direct so every conversion carries a channel.
      *
-     * @param array<string, string> $row  Sanitized event row (utm_*, click_id_type, referrer).
+     * @param array<string, string> $row  Sanitized event row (utm_*, click_id_type, referrer, session_referrer).
      * @param string                $type Event type ('pageview' or 'form_success').
      * @return string Channel label, or '' for mid-session pageviews.
      */
@@ -186,12 +188,36 @@ final class Channels
         // Untagged traffic: the referrer decides.
         $host = strtolower((string) wp_parse_url((string) ($row['referrer'] ?? ''), PHP_URL_HOST));
 
+        if ($host !== '' && !in_array($host, Options::allowedHosts(), true)) {
+            return self::hostChannel($host);
+        }
+
+        // The event's own referrer is missing or internal — mid-session
+        // navigation (or a stripped referrer). The tracker persists the
+        // referrer the session ENTERED through and sends it as
+        // session_referrer, so organic/social/referral acquisition survives
+        // internal navigation instead of degrading to Direct.
+        $sessionHost = strtolower((string) wp_parse_url((string) ($row['session_referrer'] ?? ''), PHP_URL_HOST));
+
+        if ($sessionHost !== '' && !in_array($sessionHost, Options::allowedHosts(), true)) {
+            return self::hostChannel($sessionHost);
+        }
+
         if ($host === '') {
             return 'Direct';
         }
-        if (in_array($host, Options::allowedHosts(), true)) {
-            return $isConversion ? 'Direct' : '';
-        }
+
+        return $isConversion ? 'Direct' : '';
+    }
+
+    /**
+     * Channel implied by an external referrer host.
+     *
+     * @param string $host Lowercase external hostname.
+     * @return string
+     */
+    private static function hostChannel(string $host): string
+    {
         if (self::hostMatches($host, self::SEARCH_SOURCES)) {
             return 'Organic Search';
         }
@@ -203,9 +229,15 @@ final class Channels
     }
 
     /**
-     * Whether any dot-separated label of a hostname matches a known source
-     * name — so "l.facebook.com" and "www.google.co.uk" match without a
-     * substring comparison that lookalike domains could game.
+     * Whether a hostname's registrable domain matches a known source name —
+     * "l.facebook.com" and "www.google.co.uk" match, but "google.example.test"
+     * does not: the matched label must sit directly before the public suffix,
+     * not merely appear somewhere in the hostname.
+     *
+     * The public suffix is approximated (no suffix list dependency) as either
+     * one trailing label of 2–3 characters ("com", "de", "org") or a pair
+     * like "co.uk" / "com.au" — which covers every search engine and social
+     * network in the lists above.
      *
      * @param string   $host    Lowercase hostname.
      * @param string[] $sources Canonical source names.
@@ -213,8 +245,19 @@ final class Channels
      */
     private static function hostMatches(string $host, array $sources): bool
     {
-        foreach (explode('.', $host) as $label) {
-            if (in_array($label, $sources, true)) {
+        $labels = explode('.', $host);
+
+        foreach ($labels as $i => $label) {
+            if (!in_array($label, $sources, true)) {
+                continue;
+            }
+
+            $suffix = array_slice($labels, $i + 1);
+
+            if (count($suffix) === 1 && preg_match('~^[a-z]{2,3}$~', $suffix[0])) {
+                return true;
+            }
+            if (count($suffix) === 2 && preg_match('~^[a-z]{2,3}$~', $suffix[0]) && preg_match('~^[a-z]{2}$~', $suffix[1])) {
                 return true;
             }
         }

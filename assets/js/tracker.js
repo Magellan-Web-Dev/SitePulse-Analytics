@@ -30,13 +30,22 @@
  *
  * Campaign attribution: all six utm parameters (source/medium/campaign/id/
  * term/content) from a tagged landing URL are stored alongside the session
- * and attached to every pageview and conversion in that session. Ad-click
+ * and attached to every event in that session — pageviews and conversions,
+ * but also clicks, form attempts, hovers, and scroll milestones, so
+ * intermediate funnel steps can be segmented by campaign. Ad-click
  * identifiers (gclid, fbclid, msclkid, …) are recognized too: only the
  * parameter NAME is kept (click_id_type) — the value is a cross-site
  * advertising ID and is never sent — and, when no utm tags are present, the
  * source/medium they imply is filled in (e.g. gclid → google / cpc). The
  * model is last-touch within the session: the most recent tagged landing
  * attributes the visit from that point on; untagged pages inherit it.
+ *
+ * Untagged acquisition persists too: the referrer the session ENTERED
+ * through (e.g. google.com for an organic visit) is stored against the
+ * session and sent as session_referrer, so a conversion three pages deep
+ * into an organic visit is still classified Organic Search rather than
+ * falling back to Direct. Like the campaign, an external re-entry within
+ * the session refreshes it (last non-direct touch).
  *
  * Privacy: no cookies are set. The session identifier lives in localStorage
  * and rotates after 30 minutes of inactivity, so it groups one visit without
@@ -99,6 +108,11 @@
     var PAGE_URL = location.origin + location.pathname;
     var REFERRER = normalizedReferrer();
     var CAMPAIGN = readCampaign();
+
+    /** True when this page load entered the site from outside: no referrer
+     *  (direct / stripped) or a referrer on another origin. */
+    var IS_ENTRANCE = REFERRER === '' ||
+        (REFERRER !== location.origin && REFERRER.indexOf(location.origin + '/') !== 0);
 
     /* ------------------------------------------------------------------ *
      *  Session identity — 30-minute inactivity window, cookie-free
@@ -167,14 +181,18 @@
     }
 
     /**
-     * The campaign attributed to this session — last-touch within the
-     * session. A tagged landing URL wins and is persisted against the
-     * session id (the most recent tagged landing re-attributes the session
-     * from that point on); untagged pageviews inherit whatever campaign the
-     * session currently carries, so a whole visit is attributed — not just
-     * the landing pageview.
+     * The acquisition attributed to this session — {c: campaign fields,
+     * r: entrance referrer} — last-touch within the session.
+     *
+     * A tagged landing URL wins and is persisted against the session id (the
+     * most recent tagged landing re-attributes the session from that point
+     * on). An untagged EXTERNAL entrance keeps the session's campaign but
+     * refreshes the entrance referrer (last non-direct touch), so organic,
+     * social, and referral acquisition survives internal navigation instead
+     * of degrading to Direct at conversion time. Untagged internal pageviews
+     * inherit whatever the session currently carries.
      */
-    function sessionCampaign(id) {
+    function sessionAcquisition(id) {
         var tagged = false;
         for (var i = 0; i < CAMPAIGN_KEYS.length; i++) {
             if (CAMPAIGN[CAMPAIGN_KEYS[i]]) {
@@ -183,28 +201,37 @@
             }
         }
 
-        if (tagged) {
-            if (sessionStore) {
-                try {
-                    sessionStore.setItem('spa_campaign', JSON.stringify({ id: id, c: CAMPAIGN }));
-                } catch (e) {
-                    // Storage full or blocked — attribution lasts this page only.
-                }
+        var stored = null;
+        if (sessionStore) {
+            try {
+                stored = JSON.parse(sessionStore.getItem('spa_campaign'));
+            } catch (e) {
+                stored = null;
             }
-            return CAMPAIGN;
+        }
+        if (!stored || stored.id !== id || typeof stored.c !== 'object' || !stored.c) {
+            stored = null;
+        }
+
+        var record;
+        if (tagged) {
+            record = { id: id, c: CAMPAIGN, r: IS_ENTRANCE ? REFERRER : (stored ? String(stored.r || '') : '') };
+        } else if (stored && (!IS_ENTRANCE || !REFERRER)) {
+            return stored; // Internal navigation or a direct re-entry: inherit as-is.
+        } else if (stored) {
+            record = { id: id, c: stored.c, r: REFERRER }; // External re-entry refreshes the referrer.
+        } else {
+            record = { id: id, c: {}, r: IS_ENTRANCE ? REFERRER : '' };
         }
 
         if (sessionStore) {
             try {
-                var stored = JSON.parse(sessionStore.getItem('spa_campaign'));
-                if (stored && stored.id === id && stored.c) {
-                    return stored.c;
-                }
+                sessionStore.setItem('spa_campaign', JSON.stringify(record));
             } catch (e) {
-                // Missing or corrupt — treat as unattributed.
+                // Storage full or blocked — attribution lasts this page only.
             }
         }
-        return {};
+        return record;
     }
 
     /** Generates a random lowercase hex string of the given length. */
@@ -259,16 +286,30 @@
         return out;
     }
 
-    /** A fresh copy of the session's current attribution, safe to attach to
-     *  an event (track() adds page context to the object it is given, so the
-     *  stored campaign object itself must never be passed in). */
+    /** Memoized acquisition record, refreshed only when the session rotates —
+     *  a snapshot is attached to every event, and re-reading storage per
+     *  hover/scroll event would be wasted work. */
+    var acquisitionCache = { id: null, record: { c: {}, r: '' } };
+
+    /** A fresh copy of the session's current attribution (campaign fields
+     *  plus session_referrer), safe to attach to an event (track() adds page
+     *  context to the object it is given, so the stored record itself must
+     *  never be passed in). */
     function campaignSnapshot() {
-        var campaign = sessionCampaign(sessionId());
+        var id = sessionId();
+        if (acquisitionCache.id !== id) {
+            acquisitionCache = { id: id, record: sessionAcquisition(id) };
+        }
+
+        var campaign = acquisitionCache.record.c || {};
         var out = {};
         for (var i = 0; i < CAMPAIGN_KEYS.length; i++) {
             if (campaign[CAMPAIGN_KEYS[i]]) {
                 out[CAMPAIGN_KEYS[i]] = campaign[CAMPAIGN_KEYS[i]];
             }
+        }
+        if (acquisitionCache.record.r) {
+            out.session_referrer = acquisitionCache.record.r;
         }
         return out;
     }
@@ -321,8 +362,9 @@
 
     /**
      * Queues one event if its type is enabled, flushing when the batch is
-     * full. Page context and the session id are attached here so callers only
-     * supply the event-specific fields.
+     * full. Page context, the session id, and the session's attribution
+     * snapshot are attached here so callers only supply the event-specific
+     * fields — every event type can be segmented by campaign and channel.
      */
     function track(type, data) {
         if (!config.events[type]) {
@@ -330,6 +372,12 @@
         }
 
         var event = data || {};
+        var attribution = campaignSnapshot();
+        for (var key in attribution) {
+            if (attribution.hasOwnProperty(key) && !event[key]) {
+                event[key] = attribution[key];
+            }
+        }
         event.type = type;
         event.page_url = PAGE_URL;
         event.page_title = document.title || '';
@@ -481,10 +529,11 @@
     }
 
     /* ------------------------------------------------------------------ *
-     *  Page views — carry the session's campaign attribution
+     *  Page views — carry the session's campaign attribution (attached by
+     *  track(), like every other event)
      * ------------------------------------------------------------------ */
 
-    track('pageview', campaignSnapshot());
+    track('pageview', {});
 
     /* ------------------------------------------------------------------ *
      *  Clicks — links, buttons, and role="button" elements
@@ -541,11 +590,11 @@
      * ------------------------------------------------------------------ */
 
     function trackConversion(label) {
-        var data = campaignSnapshot();
-        data.element_tag = 'form';
-        data.element_label = cleanLabel(label) || 'form';
-        data.event_value = 'c' + randomHex(16);
-        track('form_success', data);
+        track('form_success', {
+            element_tag: 'form',
+            element_label: cleanLabel(label) || 'form',
+            event_value: 'c' + randomHex(16)
+        });
         flush(false);
     }
 
@@ -568,8 +617,18 @@
 
     // Elementor Pro, WPForms, and Gravity Forms announce success through
     // jQuery events, which plain addEventListener cannot observe. jQuery is
-    // guaranteed present when those plugins run their frontends.
-    if (window.jQuery) {
+    // present when those plugins run their frontends, but script optimizers
+    // can load it AFTER this tracker — so binding is retried at DOM-ready,
+    // window load, and a couple of timed fallbacks instead of being checked
+    // only once.
+    var jQueryBound = false;
+
+    function bindJQueryFormEvents() {
+        if (jQueryBound || !window.jQuery) {
+            return;
+        }
+        jQueryBound = true;
+
         window.jQuery(document).on('submit_success', function (e) {
             var form = eventForm(e);
             trackConversion((form && (form.getAttribute('name') || form.id)) || 'elementor-form');
@@ -583,6 +642,14 @@
         window.jQuery(document).on('gform_confirmation_loaded', function (e, formId) {
             trackConversion('gravity-form-' + formId);
         });
+    }
+
+    bindJQueryFormEvents();
+    if (!jQueryBound) {
+        document.addEventListener('DOMContentLoaded', bindJQueryFormEvents);
+        window.addEventListener('load', bindJQueryFormEvents);
+        setTimeout(bindJQueryFormEvents, 3000);
+        setTimeout(bindJQueryFormEvents, 8000);
     }
 
     /* ------------------------------------------------------------------ *

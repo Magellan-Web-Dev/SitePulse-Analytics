@@ -64,8 +64,14 @@ final class RestController
     /** @var string[] Campaign parameters extracted from attributed events into dedicated columns. */
     private const CAMPAIGN_PARAMS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_id', 'utm_term', 'utm_content'];
 
-    /** @var string[] Event types that carry campaign attribution fields. */
-    private const ATTRIBUTED_TYPES = ['pageview', 'form_success'];
+    /**
+     * @var string[] Event types that carry campaign attribution fields — all
+     *      of them: clicks, form attempts, hovers, and scroll milestones carry
+     *      the session's attribution snapshot too, so intermediate funnel
+     *      steps (which campaigns click a CTA, attempt but never complete a
+     *      form, reach a scroll depth) can be segmented by campaign.
+     */
+    private const ATTRIBUTED_TYPES = ['pageview', 'click', 'form_submit', 'form_success', 'hover', 'scroll_depth'];
 
     /**
      * Registers the rest_api_init hook.
@@ -209,16 +215,18 @@ final class RestController
             'device'        => $device,
         ];
 
-        // Campaign attribution rides on pageview events (the tracker attaches
-        // the session's campaign to each one) and on form_success conversions
-        // (a snapshot of the session's attribution at conversion time); other
-        // event types never carry it. Only the ad-click identifier's TYPE is
-        // accepted — the value itself is never sent or stored.
+        // Campaign attribution rides on every tracker event — the tracker
+        // attaches the session's attribution snapshot at event time. Only the
+        // ad-click identifier's TYPE is accepted — the value itself is never
+        // sent or stored. session_referrer is the referrer the session
+        // ENTERED through (persisted by the tracker); it is used to classify
+        // the channel at ingestion and is not stored as its own column.
         if (in_array($type, self::ATTRIBUTED_TYPES, true)) {
             foreach (self::CAMPAIGN_PARAMS as $param) {
                 $data[$param] = self::campaignValue(self::scalarString($event[$param] ?? ''));
             }
-            $data['click_id_type'] = sanitize_key(self::scalarString($event['click_id_type'] ?? ''));
+            $data['click_id_type']    = sanitize_key(self::scalarString($event['click_id_type'] ?? ''));
+            $data['session_referrer'] = self::normalizeReferrer(self::scalarString($event['session_referrer'] ?? ''));
         }
 
         return ['type' => $type, 'data' => $data];

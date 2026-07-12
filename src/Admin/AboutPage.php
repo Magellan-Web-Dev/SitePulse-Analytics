@@ -143,7 +143,7 @@ final class AboutPage
             ],
             [
                 'title' => 'Campaigns & Channels',
-                'text'  => 'All six utm parameters and ad-click identifiers (gclid, fbclid, …) are captured from tagged landings (only the click identifier\'s name is stored, never its value), and every visit is grouped into a marketing channel — Paid Search, Organic Social, Email, Referral, Direct, and more.',
+                'text'  => 'All six utm parameters and ad-click identifiers (gclid, fbclid, …) are captured from tagged landings (only the click identifier\'s name is stored, never its value), and every visit is grouped into a marketing channel — Paid Search, Organic Social, Email, Referral, Direct, and more. The session\'s attribution — including the referrer it entered through — persists across internal navigation and rides on every event, so clicks, form attempts, and conversions deep in a visit are still credited to the campaign or channel that brought it.',
             ],
             [
                 'title' => 'Hover Activity',
@@ -186,12 +186,14 @@ final class AboutPage
             'Summary cards'         => 'Totals for page views, clicks, form submit attempts, confirmed conversions, hovers, and scroll milestones over the selected period.',
             'Daily Page Views'      => 'A bar chart of traffic across the period, for spotting trends and spikes.',
             'Top Pages'             => 'Most-viewed pages with view and unique-session counts.',
+            'Top Landing Pages'        => 'The first page of each session that started in the period — where visitors actually arrive.',
             'Top Clicked Elements'     => 'Which links and buttons visitors click most — your conversion actions.',
             'Top Form Submit Attempts' => 'Which forms are submitted, and on which pages (counted at submit time; success is not confirmed).',
             'Most Hovered Elements'    => 'Where visitor attention lingers before (or without) a click.',
             'Top Referrers'            => 'Which external sites and pages send you traffic.',
-            'Campaigns'                => 'Sessions, views, confirmed conversions, and conversion rate per utm source/medium/campaign — last-touch within the session: the most recent tagged landing attributes the visit from that point on, and untagged pages inherit it.',
-            'Channels'                 => 'Sessions, views, confirmed conversions, and conversion rate per marketing channel (Paid Search, Organic Social, Email, Referral, Direct, …), classified as events arrive.',
+            'Campaigns'                => 'Sessions, views, confirmed conversions, and session conversion rate (sessions with at least one conversion ÷ sessions) per utm source/medium/campaign/id — last-touch within the session: the most recent tagged landing attributes the visit from that point on, and untagged pages inherit it.',
+            'Campaign Terms & Content' => 'Keyword (utm_term) and creative (utm_content) performance with campaign context — shown when the period contains traffic carrying those tags.',
+            'Channels'                 => 'Sessions, views, confirmed conversions, and session conversion rate per marketing channel (Paid Search, Organic Social, Email, Referral, Direct, …), classified as events arrive.',
             'Devices'                  => 'Mobile versus desktop share of page views.',
             'Recent Activity'          => 'The latest raw events, useful for verifying tracking is working.',
         ];
@@ -228,43 +230,55 @@ final class AboutPage
         echo '<p>Batches flush every few seconds and on page exit via <code>navigator.sendBeacon</code>, '
             . 'so events are not lost when a visitor navigates away. Batches that fail with a network error or '
             . 'a 5xx response are kept in a bounded <code>sessionStorage</code> map and resent by later flushes — '
-            . 'even by the next page in that tab if navigation destroyed the one that failed. A batch body looks like this:</p>';
+            . 'even by the next page in that tab if navigation destroyed the one that failed. Every event carries the '
+            . 'session\'s attribution snapshot — the utm fields, click-identifier type, and <code>session_referrer</code> '
+            . '(the referrer the session entered through, used to classify the marketing channel; not stored as its own '
+            . 'field) — so clicks, form attempts, and scroll milestones can be segmented by campaign, not just pageviews '
+            . 'and conversions. A batch body looks like this:</p>';
 
         echo '<pre class="spa-about-code">' . esc_html(
             (string) wp_json_encode([
                 'events' => [
                     [
-                        'type'          => 'pageview',
-                        'page_url'      => home_url('/pricing/'),
-                        'page_title'    => 'Pricing',
-                        'referrer'      => 'https://www.google.com/',
-                        'session_id'    => '3f2a9c1b8e0d4f5a6b7c8d9e0f1a2b3c',
-                        'utm_source'    => 'google',
-                        'utm_medium'    => 'cpc',
-                        'utm_campaign'  => 'spring-sale',
-                        'utm_term'      => 'pricing',
-                        'click_id_type' => 'gclid',
+                        'type'             => 'pageview',
+                        'page_url'         => home_url('/pricing/'),
+                        'page_title'       => 'Pricing',
+                        'referrer'         => 'https://www.google.com/',
+                        'session_id'       => '3f2a9c1b8e0d4f5a6b7c8d9e0f1a2b3c',
+                        'utm_source'       => 'google',
+                        'utm_medium'       => 'cpc',
+                        'utm_campaign'     => 'spring-sale',
+                        'utm_term'         => 'pricing',
+                        'click_id_type'    => 'gclid',
+                        'session_referrer' => 'https://www.google.com/',
                     ],
                     [
-                        'type'          => 'click',
-                        'page_url'      => home_url('/pricing/'),
-                        'element_tag'   => 'a',
-                        'element_label' => 'Get a Quote',
-                        'target_url'    => home_url('/quote/'),
-                        'session_id'    => '3f2a9c1b8e0d4f5a6b7c8d9e0f1a2b3c',
+                        'type'             => 'click',
+                        'page_url'         => home_url('/pricing/'),
+                        'element_tag'      => 'a',
+                        'element_label'    => 'Get a Quote',
+                        'target_url'       => home_url('/quote/'),
+                        'session_id'       => '3f2a9c1b8e0d4f5a6b7c8d9e0f1a2b3c',
+                        'utm_source'       => 'google',
+                        'utm_medium'       => 'cpc',
+                        'utm_campaign'     => 'spring-sale',
+                        'utm_term'         => 'pricing',
+                        'click_id_type'    => 'gclid',
+                        'session_referrer' => 'https://www.google.com/',
                     ],
                     [
-                        'type'          => 'form_success',
-                        'page_url'      => home_url('/quote/'),
-                        'element_tag'   => 'form',
-                        'element_label' => 'quote-form',
-                        'event_value'   => 'c9d4e1f2a3b4c5d6e',
-                        'session_id'    => '3f2a9c1b8e0d4f5a6b7c8d9e0f1a2b3c',
-                        'utm_source'    => 'google',
-                        'utm_medium'    => 'cpc',
-                        'utm_campaign'  => 'spring-sale',
-                        'utm_term'      => 'pricing',
-                        'click_id_type' => 'gclid',
+                        'type'             => 'form_success',
+                        'page_url'         => home_url('/quote/'),
+                        'element_tag'      => 'form',
+                        'element_label'    => 'quote-form',
+                        'event_value'      => 'c9d4e1f2a3b4c5d6e',
+                        'session_id'       => '3f2a9c1b8e0d4f5a6b7c8d9e0f1a2b3c',
+                        'utm_source'       => 'google',
+                        'utm_medium'       => 'cpc',
+                        'utm_campaign'     => 'spring-sale',
+                        'utm_term'         => 'pricing',
+                        'click_id_type'    => 'gclid',
+                        'session_referrer' => 'https://www.google.com/',
                     ],
                 ],
             ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES)
@@ -329,7 +343,10 @@ final class AboutPage
             . '<strong>Webhook Status</strong> toggle to pause all scheduled sends without losing your configuration. '
             . 'Delivery windows are tracked per endpoint: each payload covers the time since that endpoint\'s last '
             . 'successful delivery, so a temporarily failing endpoint receives the full missed window on the next run '
-            . 'instead of losing data.</p>';
+            . 'instead of losing data. Conversion delivery is <strong>lossless</strong>: '
+            . '<code>analytics.conversions.recent</code> lists every individual conversion in the delivery\'s window, and '
+            . 'a window holding more than 100 conversions is split into consecutive, non-overlapping deliveries (worked '
+            . 'off within the same run) rather than dropping the overflow.</p>';
 
         echo '<p>Failed deliveries are retried automatically up to 5 more times over about 24 hours '
             . '(after 5 minutes, 30 minutes, 2 hours, 6 hours, and 16 hours). The exact JSON body that failed is frozen '
@@ -344,7 +361,7 @@ final class AboutPage
         echo '<pre class="spa-about-code">' . esc_html(
             (string) wp_json_encode([
                 'source'         => 'sitepulse-analytics',
-                'plugin_version' => defined('SPA_VERSION') ? SPA_VERSION : '1.2.0',
+                'plugin_version' => defined('SPA_VERSION') ? SPA_VERSION : '1.3.0',
                 'website_info'   => [
                     'name'   => get_bloginfo('name'),
                     'url'    => home_url(),
@@ -361,6 +378,7 @@ final class AboutPage
                     'totals'          => ['pageview' => 1240, 'click' => 512, 'form_submit' => 38, 'form_success' => 24, 'hover' => 940, 'scroll_depth' => 2210],
                     'daily_pageviews' => [['date' => '2026-07-09', 'count' => 610], ['date' => '2026-07-10', 'count' => 630]],
                     'top_pages'       => [['page_url' => home_url('/'), 'page_title' => 'Home', 'views' => 400, 'sessions' => 310]],
+                    'top_landing_pages' => [['page_url' => home_url('/spring-sale/'), 'page_title' => 'Spring Sale', 'sessions' => 180]],
                     'top_clicks'      => [['element_label' => 'Get a Quote', 'element_tag' => 'a', 'target_url' => home_url('/quote/'), 'clicks' => 88]],
                     'top_forms'       => [['element_label' => 'contact-form', 'page_url' => home_url('/contact/'), 'submissions' => 21]],
                     'top_hovers'      => [['element_label' => 'Pricing', 'element_tag' => 'a', 'hovers' => 130]],
@@ -368,9 +386,15 @@ final class AboutPage
                     'top_campaigns'   => [[
                         'utm_source' => 'newsletter', 'utm_medium' => 'email', 'utm_campaign' => 'spring-sale',
                         'utm_id' => 'cmp-2210', 'channel' => 'Email',
-                        'views' => 96, 'sessions' => 74, 'conversions' => 7, 'conversion_rate' => 9.46,
+                        'views' => 96, 'sessions' => 74,
+                        'conversions' => 7, 'converting_sessions' => 6, 'conversion_rate' => 8.11,
                     ]],
-                    'channels'        => [['channel' => 'Email', 'views' => 96, 'sessions' => 74, 'conversions' => 7, 'conversion_rate' => 9.46]],
+                    'top_campaign_content' => [[
+                        'utm_source' => 'google', 'utm_campaign' => 'summer-sale',
+                        'utm_term' => 'emergency plumber', 'utm_content' => 'ad-variant-b',
+                        'views' => 42, 'sessions' => 31, 'conversions' => 3,
+                    ]],
+                    'channels'        => [['channel' => 'Email', 'views' => 96, 'sessions' => 74, 'conversions' => 7, 'converting_sessions' => 6, 'conversion_rate' => 8.11]],
                     'conversions'     => [
                         'total'  => 24,
                         'recent' => [[

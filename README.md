@@ -2,7 +2,7 @@
 
 A self-hosted visitor analytics plugin for WordPress. SitePulse tracks page views, link and button clicks, form submissions, **confirmed form conversions with campaign attribution**, mouse hover activity, and scroll depth, then surfaces everything inside the WordPress dashboard — making it easy to identify popular pages, which campaigns and channels actually produce leads, and the areas of your content visitors engage with. On a configurable schedule, aggregated analytics (including individual attributed conversions) can also be delivered as JSON `POST` requests to one or more webhook endpoints.
 
-- **Version:** 1.2.0
+- **Version:** 1.3.0
 - **Requires WordPress:** 6.3+
 - **Requires PHP:** 8.1+
 - **License:** GPL-2.0-or-later
@@ -14,13 +14,13 @@ A self-hosted visitor analytics plugin for WordPress. SitePulse tracks page view
 - **Click tracking** — links, buttons, submit inputs, and `role="button"` elements, with the element's label and destination URL.
 - **Form submission tracking** — native `submit` events are captured before any AJAX handler can swallow them, so Elementor and similar AJAX forms are counted too. Counted at submit time, so these are submission *attempts*, not confirmed successes.
 - **Confirmed conversions** — a separate `form_success` event fires only when the form plugin reports that the server accepted the submission: Elementor Pro's `submit_success`, Contact Form 7's `wpcf7mailsent`, WPForms' `wpformsAjaxSubmitSuccess`, and Gravity Forms' `gform_confirmation_loaded`, plus a `spa:conversion` DOM event for custom goals. Every conversion carries a unique conversion id (duplicates from retried deliveries are never double-counted) and a **snapshot of the session's campaign attribution at conversion time**, so each conversion record is self-contained — even when the tagged landing happened earlier in the session or the campaign data has since aged out.
-- **Campaign attribution** — all six utm parameters (`utm_source`, `utm_medium`, `utm_campaign`, `utm_id`, `utm_term`, `utm_content`) are captured from tagged landing URLs, and ad-click identifiers (`gclid`, `gbraid`, `wbraid`, `fbclid`, `msclkid`, `ttclid`, `twclid`, `li_fat_id`) are recognized: only the parameter *name* is stored (never the value), and when no utm tags are present the implied source/medium is filled in (e.g. `gclid` → `google` / `cpc`). Attribution is last-touch within the session.
-- **Channel grouping** — every attributed event is classified into a marketing channel at ingestion (Paid Search, Paid Social, Organic Search, Organic Social, Email, Display, Affiliate, SMS, Referral, Direct, Other), with source aliases normalized (`fb` / `facebook.com` → `facebook`) so reports don't fragment. Both the alias map and the channel rules are filterable.
+- **Campaign attribution** — all six utm parameters (`utm_source`, `utm_medium`, `utm_campaign`, `utm_id`, `utm_term`, `utm_content`) are captured from tagged landing URLs, and ad-click identifiers (`gclid`, `gbraid`, `wbraid`, `fbclid`, `msclkid`, `ttclid`, `twclid`, `li_fat_id`) are recognized: only the parameter *name* is stored (never the value), and when no utm tags are present the implied source/medium is filled in (e.g. `gclid` → `google` / `cpc`). Attribution is last-touch within the session, and the snapshot rides on **every** event in the session — pageviews and conversions, but also clicks, form attempts, hovers, and scroll milestones — so intermediate funnel steps can be segmented by campaign. Untagged acquisition persists too: the referrer a session *entered* through is stored client-side and sent as `session_referrer`, so an organic or referral visit keeps its channel across internal navigation instead of degrading to Direct at conversion time.
+- **Channel grouping** — every attributed event is classified into a marketing channel at ingestion (Paid Search, Paid Social, Organic Search, Organic Social, Email, Display, Affiliate, SMS, Referral, Direct, Other), with source aliases normalized (`fb` / `facebook.com` → `facebook`) so reports don't fragment. When an event's own referrer is internal or missing, classification falls back to the session's persisted entrance referrer (`session_referrer`). Referrer hosts match a search engine or social network only in the registrable-domain position (`www.google.co.uk` matches; a lookalike like `google.example.test` does not). Both the alias map and the channel rules are filterable.
 - **Hover tracking** — records when a visitor's pointer rests on an interactive element or image for a configurable dwell time (default 800 ms), once per element per page view. Add `data-spa-hover` to any element to opt it into hover tracking.
 - **Scroll depth** — 25/50/75/100% milestones, once each per page view.
 - **Custom server-side events** — record anything else with `spa_track_event()`.
-- **Dashboard analytics** — summary cards, a daily page-view chart, top pages, top clicked elements, top forms, most-hovered elements, top referrers, campaign performance (sessions, conversions, conversion rate), a channel breakdown, a device breakdown, and a recent-activity feed, filterable by 7/30/90-day periods (calendar days, UTC).
-- **Webhook delivery** — aggregated analytics sent as JSON to **any number of endpoints** on an hourly, twice-daily, daily, or weekly schedule, with per-endpoint delivery windows, automatic retries on failure, a manual test-send button, and a delivery log.
+- **Dashboard analytics** — summary cards, a daily page-view chart, top pages, top landing pages, top clicked elements, top forms, most-hovered elements, top referrers, campaign performance (sessions, conversions, session conversion rate), a keyword/creative drilldown (`utm_term` / `utm_content`), a channel breakdown, a device breakdown, and a recent-activity feed, filterable by 7/30/90-day periods (calendar days, UTC).
+- **Webhook delivery** — aggregated analytics sent as JSON to **any number of endpoints** on an hourly, twice-daily, daily, or weekly schedule, with per-endpoint delivery windows, automatic retries on failure, a manual test-send button, and a delivery log. Conversion delivery is **lossless**: windows holding more than 100 individual conversions are split into consecutive deliveries instead of dropping the overflow.
 - **Bounded storage** — a daily cleanup cron deletes events older than the configured retention window (default 90 days, adjustable 7–365).
 - **GitHub-powered updates** — new releases published to the GitHub repository appear as standard update notifications on the Plugins screen.
 
@@ -48,7 +48,7 @@ The endpoint defends itself in layers: it accepts only whitelisted, currently-en
 ### Privacy posture
 
 - No cookies are set. The session identifier lives in `localStorage` and rotates after 30 minutes of inactivity, so it groups one visit (across tabs) without becoming a persistent visitor ID.
-- Tracked URLs are canonicalized to scheme + host + path — no query strings are ever stored, so search terms, tokens, and emails in a page URL's or referrer's query string never reach the database.
+- Tracked URLs are canonicalized to scheme + host + path — no query strings are ever stored, so search terms, tokens, and emails in a page URL's or referrer's query string never reach the database. The session's entrance referrer (`session_referrer`) is normalized the same way and is used only to classify the marketing channel at ingestion — it is never stored as its own field.
 - What **is** retained, stated precisely: campaign parameter *values* (`utm_source`, `utm_medium`, `utm_campaign`, `utm_id`, `utm_term`, `utm_content`) are stored after text sanitization (source/medium are lowercased and alias-normalized) — except values containing an `@`, which are dropped as likely email addresses — so **never put personal information in UTM parameters**. Ad-click identifiers (`gclid`, `fbclid`, …) are handled more strictly: only the parameter *name* is stored (as `click_id_type`); the identifier value is a cross-site advertising ID that may qualify as personal data, so the tracker never even sends it. Clicked `mailto:` and `tel:` destinations are stored whole (the address/number *is* the destination); if that is unacceptable for your site, disable click tracking or strip `target_url` via the `spa_tracked_event` filter.
 - Optional: honor Do Not Track / Global Privacy Control browser signals (off by default; toggle under Settings → Tracking). Enforced both in the tracker (it never starts) and at the REST endpoint (batches carrying `DNT: 1` / `Sec-GPC: 1` are discarded). Note DNT/GPC is an opt-out signal, not a consent mechanism — if your jurisdiction requires consent, gate the tracker with your consent tool.
 - No IP addresses or user agents are stored — only a coarse `mobile`/`desktop` device bucket.
@@ -64,12 +64,14 @@ The endpoint defends itself in layers: it accepts only whitelisted, currently-en
 | Summary cards | Totals for page views, clicks, form submit attempts, confirmed conversions, hovers, and scroll milestones |
 | Daily Page Views | A bar chart of traffic over the period |
 | Top Pages | Most-viewed pages with view and session counts (sessions use a 30-minute inactivity window) |
+| Top Landing Pages | The first page of each session that started in the period — where visitors actually arrive |
 | Top Clicked Elements | Which links and buttons visitors click most — your conversion actions |
 | Top Form Submit Attempts | Which forms are submitted, and on which pages (counted at submit time; success not confirmed) |
 | Most Hovered Elements | Where visitor attention lingers |
 | Top Referrers | Which external sites and pages send you traffic |
-| Campaigns | Sessions, views, confirmed conversions, and conversion rate per `utm_source` / `utm_medium` / `utm_campaign`. Attribution is last-touch within the session: the most recent tagged landing attributes the visit from that point on, and untagged pages inherit it |
-| Channels | Sessions, views, confirmed conversions, and conversion rate per marketing channel (Paid Search, Organic Social, Email, Referral, Direct, …), classified at ingestion |
+| Campaigns | Sessions, views, confirmed conversions, and session conversion rate (sessions with ≥ 1 conversion ÷ sessions) per `utm_source` / `utm_medium` / `utm_campaign` / `utm_id`. Attribution is last-touch within the session: the most recent tagged landing attributes the visit from that point on, and untagged pages inherit it |
+| Campaign Terms & Content | Keyword (`utm_term`) and creative (`utm_content`) performance with campaign context — shown when the period contains traffic carrying those tags |
+| Channels | Sessions, views, confirmed conversions, and session conversion rate per marketing channel (Paid Search, Organic Social, Email, Referral, Direct, …), classified at ingestion |
 | Devices | Mobile vs desktop share of page views |
 | Recent Activity | The latest raw events, for verifying tracking is working |
 
@@ -92,7 +94,7 @@ Example payload:
 ```json
 {
     "source": "sitepulse-analytics",
-    "plugin_version": "1.2.0",
+    "plugin_version": "1.3.0",
     "website_info": {
         "name": "Example Site",
         "url": "https://example.com",
@@ -109,6 +111,7 @@ Example payload:
         "totals": { "pageview": 1240, "click": 512, "form_submit": 38, "form_success": 24, "hover": 940, "scroll_depth": 2210 },
         "daily_pageviews": [ { "date": "2026-07-09", "count": 610 }, { "date": "2026-07-10", "count": 630 } ],
         "top_pages": [ { "page_url": "https://example.com/", "page_title": "Home", "views": 400, "sessions": 310 } ],
+        "top_landing_pages": [ { "page_url": "https://example.com/spring-sale/", "page_title": "Spring Sale", "sessions": 180 } ],
         "top_clicks": [ { "element_label": "Get a Quote", "element_tag": "a", "target_url": "https://example.com/quote", "clicks": 88 } ],
         "top_forms": [ { "element_label": "contact-form", "page_url": "https://example.com/contact", "submissions": 21 } ],
         "top_hovers": [ { "element_label": "Pricing", "element_tag": "a", "hovers": 130 } ],
@@ -117,12 +120,20 @@ Example payload:
             {
                 "utm_source": "newsletter", "utm_medium": "email", "utm_campaign": "spring-sale",
                 "utm_id": "cmp-2210", "channel": "Email",
-                "views": 96, "sessions": 74, "conversions": 7, "conversion_rate": 9.46
+                "views": 96, "sessions": 74,
+                "conversions": 7, "converting_sessions": 6, "conversion_rate": 8.11
+            }
+        ],
+        "top_campaign_content": [
+            {
+                "utm_source": "google", "utm_campaign": "summer-sale",
+                "utm_term": "emergency plumber", "utm_content": "ad-variant-b",
+                "views": 42, "sessions": 31, "conversions": 3
             }
         ],
         "channels": [
-            { "channel": "Paid Search", "views": 320, "sessions": 240, "conversions": 12, "conversion_rate": 5 },
-            { "channel": "Email", "views": 96, "sessions": 74, "conversions": 7, "conversion_rate": 9.46 }
+            { "channel": "Paid Search", "views": 320, "sessions": 240, "conversions": 12, "converting_sessions": 11, "conversion_rate": 4.58 },
+            { "channel": "Email", "views": 96, "sessions": 74, "conversions": 7, "converting_sessions": 6, "conversion_rate": 8.11 }
         ],
         "conversions": {
             "total": 24,
@@ -150,7 +161,7 @@ Example payload:
 
 `website_info.id` and `website_info.client` (`first_name`, `last_name`, `id`) are optional identifiers configured under **Settings → Webhook Settings**; each is always present in the payload as an empty string when not set, so consumers never have to check for its existence.
 
-`analytics.conversions.recent` lists individual confirmed conversions (capped at the 100 newest in the window, deduplicated by `conversion_id`), each carrying the attribution snapshot taken **when the conversion occurred** — so a downstream CRM or automation platform never has to search older payloads to attribute a lead. `analytics.channels` and the enriched `analytics.top_campaigns` provide the aggregate view; conversion counts in both are deduplicated by conversion id.
+`analytics.conversions.recent` lists **every** individual confirmed conversion in the delivery window (deduplicated by `conversion_id`), each carrying the attribution snapshot taken **when the conversion occurred** — so a downstream CRM or automation platform never has to search older payloads to attribute a lead. Conversion delivery is **lossless**: a window holding more than 100 conversions is automatically split — the delivery covers a shorter window containing the first 100, and the remainder goes out as the next delivery (consecutive, non-overlapping windows, worked off within the same dispatch run) — so no conversion record is ever skipped by a listing cap. `analytics.channels` and the enriched `analytics.top_campaigns` provide the aggregate view; conversion counts in both are deduplicated by conversion id, and `conversion_rate` is a **session conversion rate** (sessions with at least one conversion ÷ sessions, capped at 100) with the raw `conversions` and `converting_sessions` counts alongside.
 
 Requests are sent with `wp_safe_remote_post()` (endpoints are re-validated at request time) and redirects disabled, and every request carries an `Idempotency-Key` header equal to the payload's `delivery_id`.
 
@@ -259,6 +270,18 @@ sitepulse-analytics/
 The plugin checks the [GitHub repository's](https://github.com/Magellan-Web-Dev/SitePulse-Analytics) latest release every 12 hours through WordPress's normal update pipeline. Publishing a release with a tag like `v1.1.0` makes the update banner appear on the Plugins screen; a **Check for updates** row action forces an immediate check. After an update installs, the plugin folder is automatically normalized back to `sitepulse-analytics/` before WordPress reactivates it.
 
 ## Changelog
+
+### 1.3.0
+
+- **Lossless webhook conversion delivery:** a reporting window holding more than 100 individual conversions is now split into consecutive, non-overlapping deliveries (each ≤ 100 conversions, worked off within the same dispatch run, bounded at 10 windows per run) instead of listing only the newest 100 and advancing past the rest — no conversion record can be skipped anymore. `analytics.conversions.recent` therefore always contains every conversion in its window.
+- **Persistent untagged acquisition:** the tracker now stores the referrer each session *entered* through (refreshed on external re-entries, alongside the existing last-touch campaign persistence) and sends it as `session_referrer`. Channel classification falls back to it when an event's own referrer is internal or missing — so a conversion three pages into an organic, social, or referral visit is attributed to that channel instead of Direct. Applies to new events onward.
+- **Campaign report correctness:** campaign rows are now grouped by `utm_source` / `utm_medium` / `utm_campaign` / `utm_id` (distinct campaign IDs no longer merge, and the displayed ID is exact rather than `MAX()`), and a visit tagged with *any* of the six utm fields — including only `utm_id`, `utm_term`, or `utm_content` — now counts as campaign traffic.
+- **Session conversion rate:** `conversion_rate` in the Campaigns and Channels reports is now sessions-with-at-least-one-conversion ÷ sessions (capped at 100%), so multi-conversion sessions can no longer push it past 100%; the raw `conversions` count and the new `converting_sessions` ride alongside in the payload.
+- **Keyword/creative drilldown:** new Campaign Terms & Content dashboard table and `analytics.top_campaign_content` payload section — performance per `utm_term` / `utm_content` with campaign context.
+- **Intermediate-event attribution:** the session's attribution snapshot (utm fields, click-id type, `session_referrer`) is now attached to *every* tracked event — clicks, form attempts, hovers, scroll milestones — not just pageviews and conversions, enabling campaign-level funnel analysis (e.g. which campaigns attempt but never complete a form).
+- **Top Landing Pages:** new dashboard table and `analytics.top_landing_pages` payload section — the first page of each session that started in the period.
+- **Channel classification hardening:** a referrer host now matches a search engine or social network only in the registrable-domain position (`www.google.co.uk` still matches; a lookalike like `google.example.test` no longer classifies as Organic Search).
+- **Form-plugin event binding:** the jQuery-based success listeners (Elementor Pro, WPForms, Gravity Forms) are now bound with retries at DOM-ready, window load, and timed fallbacks, so script optimizers that load jQuery after the tracker no longer silently disable conversion tracking.
 
 ### 1.2.0
 

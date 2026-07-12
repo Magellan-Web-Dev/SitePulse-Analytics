@@ -108,11 +108,13 @@ final class DashboardPage
 
         echo '<div class="spa-tables">';
         self::renderTopPages($start, $end);
+        self::renderLandingPages($start, $end);
         self::renderTopClicks($start, $end);
         self::renderTopForms($start, $end);
         self::renderTopHovers($start, $end);
         self::renderTopReferrers($start, $end);
         self::renderCampaigns($start, $end);
+        self::renderCampaignContent($start, $end);
         self::renderChannels($start, $end);
         self::renderDevices($start, $end);
         echo '</div>';
@@ -288,6 +290,38 @@ final class DashboardPage
     }
 
     /**
+     * Renders the "Top Landing Pages" table — the first page of each session
+     * that started in the period.
+     *
+     * @param string $start UTC datetime range start.
+     * @param string $end   UTC datetime range end.
+     * @return void
+     */
+    private static function renderLandingPages(string $start, string $end): void
+    {
+        $rows = Reports::topLandingPages($start, $end);
+
+        echo '<div class="spa-section">';
+        echo '<h2>Top Landing Pages</h2>';
+        echo '<table class="wp-list-table widefat striped">';
+        echo '<thead><tr><th>Landing Page</th><th>Sessions</th></tr></thead><tbody>';
+
+        if ($rows === []) {
+            echo '<tr><td colspan="2">No sessions recorded in this period.</td></tr>';
+        }
+
+        foreach ($rows as $row) {
+            $label = $row['page_title'] !== '' ? $row['page_title'] : $row['page_url'];
+            echo '<tr>';
+            echo '<td><a href="' . esc_url($row['page_url']) . '" target="_blank" rel="noopener">' . esc_html($label) . '</a></td>';
+            echo '<td>' . esc_html(number_format_i18n($row['sessions'])) . '</td>';
+            echo '</tr>';
+        }
+
+        echo '</tbody></table></div>';
+    }
+
+    /**
      * Renders the "Top Clicked Elements" table.
      *
      * @param string $start UTC datetime range start.
@@ -415,7 +449,9 @@ final class DashboardPage
 
     /**
      * Renders the "Campaigns" table: sessions, views, and confirmed
-     * conversions attributed to each utm source/medium/campaign combination.
+     * conversions attributed to each utm source/medium/campaign/id
+     * combination. The conversion rate is a session conversion rate —
+     * sessions with at least one conversion ÷ sessions.
      *
      * @param string $start UTC datetime range start.
      * @param string $end   UTC datetime range end.
@@ -428,10 +464,11 @@ final class DashboardPage
         echo '<div class="spa-section">';
         echo '<h2>Campaigns</h2>';
         echo '<table class="wp-list-table widefat striped">';
-        echo '<thead><tr><th>Source</th><th>Medium</th><th>Campaign</th><th>Sessions</th><th>Views</th><th>Conversions</th><th>Conv. Rate</th></tr></thead><tbody>';
+        echo '<thead><tr><th>Source</th><th>Medium</th><th>Campaign</th><th>ID</th><th>Sessions</th><th>Views</th><th>Conversions</th>'
+            . '<th title="Sessions with at least one conversion ÷ sessions">Conv. Rate</th></tr></thead><tbody>';
 
         if ($rows === []) {
-            echo '<tr><td colspan="7">No campaign-tagged (utm) visits recorded in this period.</td></tr>';
+            echo '<tr><td colspan="8">No campaign-tagged (utm) visits recorded in this period.</td></tr>';
         }
 
         foreach ($rows as $row) {
@@ -439,10 +476,48 @@ final class DashboardPage
             echo '<td>' . esc_html($row['utm_source'] !== '' ? $row['utm_source'] : '—') . '</td>';
             echo '<td>' . esc_html($row['utm_medium'] !== '' ? $row['utm_medium'] : '—') . '</td>';
             echo '<td>' . esc_html($row['utm_campaign'] !== '' ? $row['utm_campaign'] : '—') . '</td>';
+            echo '<td>' . esc_html($row['utm_id'] !== '' ? $row['utm_id'] : '—') . '</td>';
             echo '<td>' . esc_html(number_format_i18n($row['sessions'])) . '</td>';
             echo '<td>' . esc_html(number_format_i18n($row['views'])) . '</td>';
             echo '<td>' . esc_html(number_format_i18n($row['conversions'])) . '</td>';
             echo '<td>' . esc_html($row['sessions'] > 0 ? $row['conversion_rate'] . '%' : '—') . '</td>';
+            echo '</tr>';
+        }
+
+        echo '</tbody></table></div>';
+    }
+
+    /**
+     * Renders the "Campaign Terms & Content" drilldown: performance per
+     * utm_term (keyword) and utm_content (creative), with campaign context.
+     * Rendered only when at least one visit in the period carried those tags.
+     *
+     * @param string $start UTC datetime range start.
+     * @param string $end   UTC datetime range end.
+     * @return void
+     */
+    private static function renderCampaignContent(string $start, string $end): void
+    {
+        $rows = Reports::topCampaignContent($start, $end);
+
+        if ($rows === []) {
+            return;
+        }
+
+        echo '<div class="spa-section">';
+        echo '<h2>Campaign Terms &amp; Content</h2>';
+        echo '<table class="wp-list-table widefat striped">';
+        echo '<thead><tr><th>Source</th><th>Campaign</th><th>Term</th><th>Content</th><th>Sessions</th><th>Views</th><th>Conversions</th></tr></thead><tbody>';
+
+        foreach ($rows as $row) {
+            echo '<tr>';
+            echo '<td>' . esc_html($row['utm_source'] !== '' ? $row['utm_source'] : '—') . '</td>';
+            echo '<td>' . esc_html($row['utm_campaign'] !== '' ? $row['utm_campaign'] : '—') . '</td>';
+            echo '<td>' . esc_html($row['utm_term'] !== '' ? $row['utm_term'] : '—') . '</td>';
+            echo '<td>' . esc_html($row['utm_content'] !== '' ? $row['utm_content'] : '—') . '</td>';
+            echo '<td>' . esc_html(number_format_i18n($row['sessions'])) . '</td>';
+            echo '<td>' . esc_html(number_format_i18n($row['views'])) . '</td>';
+            echo '<td>' . esc_html(number_format_i18n($row['conversions'])) . '</td>';
             echo '</tr>';
         }
 
@@ -464,7 +539,8 @@ final class DashboardPage
         echo '<div class="spa-section">';
         echo '<h2>Channels</h2>';
         echo '<table class="wp-list-table widefat striped">';
-        echo '<thead><tr><th>Channel</th><th>Sessions</th><th>Views</th><th>Conversions</th><th>Conv. Rate</th></tr></thead><tbody>';
+        echo '<thead><tr><th>Channel</th><th>Sessions</th><th>Views</th><th>Conversions</th>'
+            . '<th title="Sessions with at least one conversion ÷ sessions">Conv. Rate</th></tr></thead><tbody>';
 
         if ($rows === []) {
             echo '<tr><td colspan="5">No channel data recorded in this period. Channels are classified as new events arrive, so this fills in from the moment of the update onward.</td></tr>';

@@ -76,6 +76,19 @@ final class WebhookDispatcher
     private const TIMEOUT = 15;
 
     /**
+     * Maximum individual conversions per delivery. A window holding more is
+     * SHRUNK to end at the overflowing conversion (see freezeDelivery()), so
+     * the overflow becomes the next delivery's window instead of being
+     * silently dropped — conversion delivery is lossless.
+     *
+     * @var int
+     */
+    private const MAX_CONVERSIONS_PER_DELIVERY = 100;
+
+    /** @var int Maximum consecutive windows one endpoint may send per dispatch run, bounding catch-up work. */
+    private const MAX_WINDOWS_PER_RUN = 10;
+
+    /**
      * Registers the cron callbacks and the settings-change listener.
      *
      * @return void
@@ -200,11 +213,28 @@ final class WebhookDispatcher
                 // end, so the fresh window below picks up exactly there.
             }
 
-            $now      = time();
-            $delivery = self::freezeDelivery($url, self::windowStart($url, $now), $now);
+            // freezeDelivery() shrinks a conversion-heavy window to the
+            // per-delivery conversion cap, so a backlog is worked off in
+            // consecutive non-overlapping windows within this run (bounded,
+            // so one endpoint can never pin the cron indefinitely).
+            for ($round = 0; $round < self::MAX_WINDOWS_PER_RUN; $round++) {
+                $now     = time();
+                $startTs = self::windowStart($url, $now);
 
-            if (!self::attemptDelivery($url, $delivery, 'scheduled', 0)) {
-                self::scheduleRetry($url, 1, $delivery);
+                if ($startTs >= $now) {
+                    break;
+                }
+
+                $delivery = self::freezeDelivery($url, $startTs, $now);
+
+                if (!self::attemptDelivery($url, $delivery, 'scheduled', 0)) {
+                    self::scheduleRetry($url, 1, $delivery);
+                    break;
+                }
+
+                if ($delivery['window_end'] >= $now) {
+                    break; // Caught up — the window was not shrunk.
+                }
             }
         }
     }
@@ -397,13 +427,28 @@ final class WebhookDispatcher
      * alter what a given delivery_id accompanies. It also means retries skip
      * the aggregate queries entirely.
      *
+     * The requested window is first bounded to at most
+     * {@see MAX_CONVERSIONS_PER_DELIVERY} individual conversions: the payload
+     * lists every conversion in its window, and a listing cap that let the
+     * window advance past unlisted conversions would lose those leads
+     * forever. A shrunk window's overflow becomes the next delivery's window
+     * (see the catch-up loop in {@see dispatch()}).
+     *
      * @param string $url     Absolute endpoint URL.
      * @param int    $startTs Window start as a unix timestamp (inclusive).
-     * @param int    $endTs   Window end as a unix timestamp (exclusive).
+     * @param int    $endTs   Requested window end as a unix timestamp (exclusive); may be shrunk.
      * @return array{window_start: int, window_end: int, delivery_id: string, body: string}
      */
     private static function freezeDelivery(string $url, int $startTs, int $endTs): array
     {
+        $boundary = Reports::conversionWindowEnd(
+            gmdate('Y-m-d H:i:s', $startTs),
+            gmdate('Y-m-d H:i:s', $endTs),
+            self::MAX_CONVERSIONS_PER_DELIVERY
+        );
+
+        $endTs = min($endTs, (int) strtotime($boundary . ' UTC'));
+
         $payload = self::buildPayload($startTs, $endTs);
 
         $payload['delivery_id'] = self::deliveryId($url, $startTs, $endTs);
