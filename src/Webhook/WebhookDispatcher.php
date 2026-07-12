@@ -16,6 +16,11 @@ use SitePulseAnalytics\Settings\Options;
  * payload covers the window since that endpoint's last successful delivery —
  * last-sent timestamps are tracked per endpoint, so adding a new endpoint or
  * a transient failure at one endpoint never skews the data another receives.
+ * A gap materially longer than one interval (downtime, a paused toggle, or a
+ * backfilled first send — see Options::webhookBackfill()) is delivered as
+ * consecutive interval-sized windows rather than one coarse catch-all window.
+ * When a signing secret is configured, every request is HMAC-signed (see
+ * sendToEndpoint()).
  *
  * Retry handling:
  *  When a delivery fails (transport error or a non-2xx status), the exact
@@ -87,6 +92,18 @@ final class WebhookDispatcher
 
     /** @var int Maximum consecutive windows one endpoint may send per dispatch run, bounding catch-up work. */
     private const MAX_WINDOWS_PER_RUN = 10;
+
+    /**
+     * Maximum rows per "top_*" list in the webhook payload (filterable via
+     * 'spa_webhook_report_limit'). Deliberately much deeper than the
+     * dashboard's top 10: a receiver aggregating deliveries long-term needs
+     * (near-)complete dimension rankings — an item missing from one window's
+     * list can never be reconstructed later. 200 keeps payloads bounded
+     * while being effectively complete for a typical site's daily window.
+     *
+     * @var int
+     */
+    private const REPORT_ROW_LIMIT = 200;
 
     /**
      * Registers the cron callbacks and the settings-change listener.
@@ -213,10 +230,19 @@ final class WebhookDispatcher
                 // end, so the fresh window below picks up exactly there.
             }
 
-            // freezeDelivery() shrinks a conversion-heavy window to the
-            // per-delivery conversion cap, so a backlog is worked off in
-            // consecutive non-overlapping windows within this run (bounded,
-            // so one endpoint can never pin the cron indefinitely).
+            // A gap longer than ~1.5 send intervals — a backfilled first
+            // send, downtime, or a paused toggle — is worked off in
+            // interval-sized windows, so history arrives at the same
+            // granularity as live deliveries instead of one coarse
+            // catch-all window. The 50% slack matters: WP-Cron always
+            // drifts a little past the interval, and capping strictly at
+            // one interval would make every routine run emit a full window
+            // plus a sliver covering the drift. freezeDelivery()
+            // additionally shrinks a conversion-heavy window to the
+            // per-delivery conversion cap. Either way the backlog is worked
+            // off in consecutive non-overlapping windows within this run
+            // (bounded, so one endpoint can never pin the cron
+            // indefinitely; the remainder resumes next run).
             for ($round = 0; $round < self::MAX_WINDOWS_PER_RUN; $round++) {
                 $now     = time();
                 $startTs = self::windowStart($url, $now);
@@ -225,7 +251,9 @@ final class WebhookDispatcher
                     break;
                 }
 
-                $delivery = self::freezeDelivery($url, $startTs, $now);
+                $interval = Options::intervalSeconds(Options::webhookInterval());
+                $endTs    = ($now - $startTs > $interval + intdiv($interval, 2)) ? $startTs + $interval : $now;
+                $delivery = self::freezeDelivery($url, $startTs, $endTs);
 
                 if (!self::attemptDelivery($url, $delivery, 'scheduled', 0)) {
                     self::scheduleRetry($url, 1, $delivery);
@@ -397,8 +425,9 @@ final class WebhookDispatcher
 
     /**
      * The start of the next reporting window for an endpoint: its last
-     * successful delivery, one full interval ago for a first send, and never
-     * older than the data the retention window still holds.
+     * successful delivery, one full interval ago for a first send (or the
+     * start of the retention window when history backfill is enabled), and
+     * never older than the data the retention window still holds.
      *
      * @param string $url Endpoint URL.
      * @param int    $now Current unix timestamp.
@@ -406,8 +435,10 @@ final class WebhookDispatcher
      */
     private static function windowStart(string $url, int $now): int
     {
-        $fallback = $now - Options::intervalSeconds(Options::webhookInterval());
         $maxAge   = $now - Options::retentionDays() * DAY_IN_SECONDS;
+        $fallback = Options::webhookBackfill()
+            ? $maxAge
+            : $now - Options::intervalSeconds(Options::webhookInterval());
 
         $lastSent = get_option(self::LAST_SENT_OPTION, []);
         $lastSent = is_array($lastSent) ? $lastSent : [];
@@ -702,7 +733,7 @@ final class WebhookDispatcher
                 'start' => gmdate('c', $startTs),
                 'end'   => gmdate('c', $endTs),
             ],
-            'analytics'      => Reports::buildSummary($start, $end),
+            'analytics'      => Reports::buildSummary($start, $end, self::reportRowLimit()),
         ];
 
         /**
@@ -713,6 +744,24 @@ final class WebhookDispatcher
          * @param int                  $endTs   Window end (unix timestamp).
          */
         return (array) apply_filters('spa_webhook_payload', $payload, $startTs, $endTs);
+    }
+
+    /**
+     * Maximum rows per "top_*" list in the webhook payload.
+     *
+     * @return int At least 1; default {@see REPORT_ROW_LIMIT}.
+     */
+    private static function reportRowLimit(): int
+    {
+        /**
+         * Filters how many rows each "top_*" list in the webhook payload may
+         * hold. Raise it if your traffic spreads across more than 200
+         * distinct pages/clicks/campaigns per delivery window and you need
+         * complete rankings downstream; lower it to shrink payloads.
+         *
+         * @param int $limit Maximum rows per list.
+         */
+        return max(1, (int) apply_filters('spa_webhook_report_limit', self::REPORT_ROW_LIMIT));
     }
 
     /**
@@ -727,6 +776,13 @@ final class WebhookDispatcher
      * hundreds of megabytes must not be buffered into PHP memory just to be
      * truncated afterwards.
      *
+     * When a signing secret is configured, the request also carries an
+     * X-SPA-Signature header: 'sha256=' followed by the HMAC-SHA256 (hex) of
+     * the exact body bytes, keyed with the secret. Computed at send time, so
+     * a retry re-signs the identical frozen bytes — the signature only
+     * changes if the secret itself is rotated between attempts, which is
+     * exactly what a receiver validating against its current secret expects.
+     *
      * @param string $url        Absolute endpoint URL.
      * @param string $body       JSON-encoded request body, sent byte-for-byte.
      * @param string $deliveryId Delivery id echoed as the Idempotency-Key header.
@@ -734,15 +790,22 @@ final class WebhookDispatcher
      */
     private static function sendToEndpoint(string $url, string $body, string $deliveryId): array
     {
+        $headers = [
+            'Content-Type'    => 'application/json; charset=utf-8',
+            'User-Agent'      => 'WordPress/SitePulse-Analytics ' . SPA_VERSION,
+            'Idempotency-Key' => $deliveryId,
+        ];
+
+        $secret = Options::webhookSecret();
+        if ($secret !== '') {
+            $headers['X-SPA-Signature'] = 'sha256=' . hash_hmac('sha256', $body, $secret);
+        }
+
         $response = wp_safe_remote_post($url, [
             'timeout'             => self::TIMEOUT,
             'redirection'         => 0,
             'limit_response_size' => DeliveryLog::MAX_BODY_BYTES,
-            'headers'             => [
-                'Content-Type'    => 'application/json; charset=utf-8',
-                'User-Agent'      => 'WordPress/SitePulse-Analytics ' . SPA_VERSION,
-                'Idempotency-Key' => $deliveryId,
-            ],
+            'headers'             => $headers,
             'body'                => $body,
         ]);
 

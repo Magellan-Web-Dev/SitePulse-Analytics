@@ -48,6 +48,8 @@ final class Options
             'webhook_active'     => true,
             'webhooks'           => [],
             'webhook_interval'   => 'daily',
+            'webhook_secret'     => '',
+            'webhook_backfill'   => false,
             'client_first_name'  => '',
             'client_last_name'   => '',
             'client_id'          => '',
@@ -268,6 +270,40 @@ final class Options
         $interval = (string) self::all()['webhook_interval'];
 
         return in_array($interval, self::INTERVALS, true) ? $interval : 'daily';
+    }
+
+    /**
+     * The shared secret used to sign webhook request bodies, or '' when
+     * signing is not configured.
+     *
+     * When set, every webhook request carries an X-SPA-Signature header of
+     * the form 'sha256=<hex>' — the HMAC-SHA256 of the exact raw JSON body,
+     * keyed with this secret — so a receiver can verify the payload came
+     * from this installation and was not altered in transit. The signature
+     * is computed at send time from the frozen body, so rotating the secret
+     * mid-retry simply signs the identical bytes with the new key.
+     *
+     * @return string
+     */
+    public static function webhookSecret(): string
+    {
+        return (string) self::all()['webhook_secret'];
+    }
+
+    /**
+     * Whether a newly added webhook endpoint should be backfilled with the
+     * full retained history (in interval-sized windows) instead of starting
+     * from one send interval ago.
+     *
+     * Applies to any endpoint that has never had a successful delivery at
+     * the moment its first window is computed — enabling this after an
+     * endpoint has already received data changes nothing for that endpoint.
+     *
+     * @return bool
+     */
+    public static function webhookBackfill(): bool
+    {
+        return !empty(self::all()['webhook_backfill']);
     }
 
     /**

@@ -343,7 +343,13 @@ final class AboutPage
             . '<strong>Webhook Status</strong> toggle to pause all scheduled sends without losing your configuration. '
             . 'Delivery windows are tracked per endpoint: each payload covers the time since that endpoint\'s last '
             . 'successful delivery, so a temporarily failing endpoint receives the full missed window on the next run '
-            . 'instead of losing data. Conversion delivery is <strong>lossless</strong>: '
+            . 'instead of losing data — a gap longer than one interval is delivered as consecutive interval-sized '
+            . 'windows, preserving per-window granularity. With <strong>History backfill</strong> enabled in Settings, '
+            . 'a newly added endpoint starts from the beginning of the retention window instead of one interval ago, '
+            . 'so it receives everything the site still holds. Each <code>top_*</code> list in the payload holds up to '
+            . '200 rows (tunable via the <code>spa_webhook_report_limit</code> filter) — far deeper than the '
+            . 'dashboard\'s top 10, so downstream systems can build (near-)complete long-term rankings. '
+            . 'Conversion delivery is <strong>lossless</strong>: '
             . '<code>analytics.conversions.recent</code> lists every individual conversion in the delivery\'s window, and '
             . 'a window holding more than 100 conversions is split into consecutive, non-overlapping deliveries (worked '
             . 'off within the same run) rather than dropping the overflow.</p>';
@@ -361,7 +367,7 @@ final class AboutPage
         echo '<pre class="spa-about-code">' . esc_html(
             (string) wp_json_encode([
                 'source'         => 'sitepulse-analytics',
-                'plugin_version' => defined('SPA_VERSION') ? SPA_VERSION : '1.3.0',
+                'plugin_version' => defined('SPA_VERSION') ? SPA_VERSION : '1.4.0',
                 'website_info'   => [
                     'name'   => get_bloginfo('name'),
                     'url'    => home_url(),
@@ -424,7 +430,10 @@ final class AboutPage
 
         echo '<p>Requests are sent with <code>wp_safe_remote_post()</code> (endpoints are re-validated at request time) and '
             . 'redirects disabled, and every request carries an <code>Idempotency-Key</code> header equal to the '
-            . 'payload\'s <code>delivery_id</code>. A <strong>"Send test payload now"</strong> button on the Settings '
+            . 'payload\'s <code>delivery_id</code>. When a <strong>Signing secret</strong> is configured in Settings, '
+            . 'every request also carries an <code>X-SPA-Signature</code> header — <code>sha256=&lt;hex&gt;</code>, the '
+            . 'HMAC-SHA256 of the raw JSON body keyed with the secret — so the receiver can verify each payload came '
+            . 'from this installation and was not altered in transit. A <strong>"Send test payload now"</strong> button on the Settings '
             . 'page delivers the last 7 days to every endpoint immediately (flagged with <code>"test": true</code>).</p>';
 
         echo '<p><em>' . esc_html($count === 0
@@ -535,6 +544,9 @@ final class AboutPage
         echo '<tr><td><code>spa_webhook_payload</code></td>'
             . '<td>Modify the webhook payload before it is sent. '
             . 'Receives <code>(array $payload, int $startTs, int $endTs)</code>.</td></tr>';
+        echo '<tr><td><code>spa_webhook_report_limit</code></td>'
+            . '<td>Maximum rows per <code>top_*</code> list in the webhook payload (default 200). '
+            . 'Receives <code>(int $limit)</code>.</td></tr>';
         echo '<tr><td><code>spa_allowed_hosts</code></td>'
             . '<td>Hostnames accepted in tracked page URLs and Origin/Referer checks. Receives <code>(string[] $hosts)</code>.</td></tr>';
         echo '<tr><td><code>spa_rate_limits</code></td>'

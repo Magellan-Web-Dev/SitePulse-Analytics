@@ -819,6 +819,11 @@ final class Reports
      * Full aggregate summary for a range — the shape shared by the dashboard
      * and the webhook payload's "analytics" section.
      *
+     * $limit caps every "top_*" list. The dashboard uses the default 10; the
+     * webhook dispatcher passes a much deeper limit so downstream systems
+     * aggregating deliveries long-term see (near-)complete dimension rankings
+     * instead of only each window's top 10.
+     *
      * The conversion listing cap is generous (500) because the webhook
      * dispatcher already bounds a delivery window to 100 conversions via
      * {@see conversionWindowEnd()}; the headroom only matters for windows
@@ -827,21 +832,22 @@ final class Reports
      *
      * @param string $start UTC datetime (inclusive).
      * @param string $end   UTC datetime (exclusive).
+     * @param int    $limit Maximum rows per "top_*" list.
      * @return array<string, mixed>
      */
-    public static function buildSummary(string $start, string $end): array
+    public static function buildSummary(string $start, string $end, int $limit = 10): array
     {
         return [
             'totals'               => self::totalsByType($start, $end),
             'daily_pageviews'      => self::dailyCounts($start, $end, 'pageview'),
-            'top_pages'            => self::topPages($start, $end),
-            'top_landing_pages'    => self::topLandingPages($start, $end),
-            'top_clicks'           => self::topClicks($start, $end),
-            'top_forms'            => self::topForms($start, $end),
-            'top_hovers'           => self::topHovers($start, $end),
-            'top_referrers'        => self::topReferrers($start, $end),
-            'top_campaigns'        => self::topCampaigns($start, $end),
-            'top_campaign_content' => self::topCampaignContent($start, $end),
+            'top_pages'            => self::topPages($start, $end, $limit),
+            'top_landing_pages'    => self::topLandingPages($start, $end, $limit),
+            'top_clicks'           => self::topClicks($start, $end, $limit),
+            'top_forms'            => self::topForms($start, $end, $limit),
+            'top_hovers'           => self::topHovers($start, $end, $limit),
+            'top_referrers'        => self::topReferrers($start, $end, $limit),
+            'top_campaigns'        => self::topCampaigns($start, $end, $limit),
+            'top_campaign_content' => self::topCampaignContent($start, $end, $limit),
             'channels'             => self::channelBreakdown($start, $end),
             'conversions'          => [
                 'total'  => self::conversionCount($start, $end),

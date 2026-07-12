@@ -130,6 +130,9 @@ final class SettingsPage
         $interval = (string) ($input['webhook_interval'] ?? 'daily');
         $out['webhook_interval'] = in_array($interval, Options::INTERVALS, true) ? $interval : 'daily';
 
+        $out['webhook_secret']   = mb_substr(sanitize_text_field((string) ($input['webhook_secret'] ?? '')), 0, 190);
+        $out['webhook_backfill'] = !empty($input['webhook_backfill']);
+
         $out['client_first_name'] = mb_substr(sanitize_text_field((string) ($input['client_first_name'] ?? '')), 0, 190);
         $out['client_last_name']  = mb_substr(sanitize_text_field((string) ($input['client_last_name'] ?? '')), 0, 190);
         $out['client_id']         = mb_substr(sanitize_text_field((string) ($input['client_id'] ?? '')), 0, 190);
@@ -429,6 +432,23 @@ final class SettingsPage
         echo '<input type="text" id="spa-website-id" class="regular-text" name="'
             . esc_attr(Options::OPTION_KEY . '[website_id]') . '" value="' . esc_attr((string) $settings['website_id']) . '">';
         echo '<p class="description">Sent as <code>website_info.id</code> in every webhook payload.</p>';
+        echo '</td></tr>';
+
+        echo '<tr><th scope="row"><label for="spa-webhook-secret">Signing secret <span class="description">(optional)</span></label></th><td>';
+        echo '<input type="text" id="spa-webhook-secret" class="regular-text code" autocomplete="off" name="'
+            . esc_attr(Options::OPTION_KEY . '[webhook_secret]') . '" value="' . esc_attr((string) $settings['webhook_secret']) . '">';
+        echo '<p class="description">When set, every webhook request includes an <code>X-SPA-Signature</code> header — '
+            . '<code>sha256=&lt;hex&gt;</code>, the HMAC-SHA256 of the raw JSON body keyed with this secret — so the '
+            . 'receiver can verify payloads genuinely came from this site. Share the secret with the endpoint operator '
+            . 'over a secure channel.</p>';
+        echo '</td></tr>';
+
+        echo '<tr><th scope="row">History backfill</th><td>';
+        echo '<label><input type="checkbox" name="' . esc_attr(Options::OPTION_KEY . '[webhook_backfill]') . '" value="1" '
+            . checked(!empty($settings['webhook_backfill']), true, false) . '> Send retained history to new endpoints</label>';
+        echo '<p class="description">When enabled, an endpoint that has never received a delivery starts from the '
+            . 'beginning of the retention window instead of one send interval ago. History is delivered in '
+            . 'interval-sized windows (up to 10 per scheduled run), so a long backlog is worked off over a few runs.</p>';
         echo '</td></tr>';
 
         echo '<tr><th scope="row"><label for="spa-webhook-interval">Send interval</label></th><td>';

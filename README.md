@@ -2,7 +2,7 @@
 
 A self-hosted visitor analytics plugin for WordPress. SitePulse tracks page views, link and button clicks, form submissions, **confirmed form conversions with campaign attribution**, mouse hover activity, and scroll depth, then surfaces everything inside the WordPress dashboard — making it easy to identify popular pages, which campaigns and channels actually produce leads, and the areas of your content visitors engage with. On a configurable schedule, aggregated analytics (including individual attributed conversions) can also be delivered as JSON `POST` requests to one or more webhook endpoints.
 
-- **Version:** 1.3.0
+- **Version:** 1.4.0
 - **Requires WordPress:** 6.3+
 - **Requires PHP:** 8.1+
 - **License:** GPL-2.0-or-later
@@ -20,7 +20,7 @@ A self-hosted visitor analytics plugin for WordPress. SitePulse tracks page view
 - **Scroll depth** — 25/50/75/100% milestones, once each per page view.
 - **Custom server-side events** — record anything else with `spa_track_event()`.
 - **Dashboard analytics** — summary cards, a daily page-view chart, top pages, top landing pages, top clicked elements, top forms, most-hovered elements, top referrers, campaign performance (sessions, conversions, session conversion rate), a keyword/creative drilldown (`utm_term` / `utm_content`), a channel breakdown, a device breakdown, and a recent-activity feed, filterable by 7/30/90-day periods (calendar days, UTC).
-- **Webhook delivery** — aggregated analytics sent as JSON to **any number of endpoints** on an hourly, twice-daily, daily, or weekly schedule, with per-endpoint delivery windows, automatic retries on failure, a manual test-send button, and a delivery log. Conversion delivery is **lossless**: windows holding more than 100 individual conversions are split into consecutive deliveries instead of dropping the overflow.
+- **Webhook delivery** — aggregated analytics sent as JSON to **any number of endpoints** on an hourly, twice-daily, daily, or weekly schedule, with per-endpoint delivery windows, optional **HMAC-signed requests**, optional **history backfill** for newly added endpoints, automatic retries on failure, a manual test-send button, and a delivery log. Conversion delivery is **lossless**: windows holding more than 100 individual conversions are split into consecutive deliveries instead of dropping the overflow.
 - **Bounded storage** — a daily cleanup cron deletes events older than the configured retention window (default 90 days, adjustable 7–365).
 - **GitHub-powered updates** — new releases published to the GitHub repository appear as standard update notifications on the Plugins screen.
 
@@ -77,7 +77,14 @@ The endpoint defends itself in layers: it accepts only whitelisted, currently-en
 
 ## Webhooks
 
-The Settings page opens with **Webhook Status** and **Webhook Settings** at the top (Tracking and Data settings follow below, and Test Delivery below that). Configure endpoints in **Webhook Settings**: each endpoint gets its own block with a URL field and an optional **label** (shown as a badge on Delivery Log entries so a specific endpoint is easy to spot), and the **+ Add Additional URL** button adds as many as you need; every block but the first has a **Remove** button. A **Webhook Status** toggle above it pauses all new scheduled deliveries without discarding your configured endpoints — it appears once at least one endpoint has a URL, mirroring the layout of the Forms Webhook Integrator plugin used elsewhere on this site. The same card also has optional **Client First Name**, **Client Last Name**, **Client ID**, and **Website ID** fields, sent as `website_info.client.first_name`/`last_name`/`id` and `website_info.id` in every payload — handy for identifying which client or site a payload belongs to when one endpoint receives deliveries from several installs. On each scheduled run every endpoint receives a `POST` with `Content-Type: application/json`. Delivery windows are tracked **per endpoint**: each payload covers the time since that endpoint's last successful delivery, so a temporarily failing endpoint receives the full missed window on the next run instead of losing data.
+The Settings page opens with **Webhook Status** and **Webhook Settings** at the top (Tracking and Data settings follow below, and Test Delivery below that). Configure endpoints in **Webhook Settings**: each endpoint gets its own block with a URL field and an optional **label** (shown as a badge on Delivery Log entries so a specific endpoint is easy to spot), and the **+ Add Additional URL** button adds as many as you need; every block but the first has a **Remove** button. A **Webhook Status** toggle above it pauses all new scheduled deliveries without discarding your configured endpoints — it appears once at least one endpoint has a URL, mirroring the layout of the Forms Webhook Integrator plugin used elsewhere on this site. The same card also has optional **Client First Name**, **Client Last Name**, **Client ID**, and **Website ID** fields, sent as `website_info.client.first_name`/`last_name`/`id` and `website_info.id` in every payload — handy for identifying which client or site a payload belongs to when one endpoint receives deliveries from several installs. On each scheduled run every endpoint receives a `POST` with `Content-Type: application/json`. Delivery windows are tracked **per endpoint**: each payload covers the time since that endpoint's last successful delivery, so a temporarily failing endpoint receives the full missed window on the next run instead of losing data. A gap longer than one send interval — downtime, a paused Webhook Status toggle, or a backfilled first send — is delivered as **consecutive interval-sized windows** (up to 10 per run; the remainder resumes on the next run), so history arrives at the same granularity as live deliveries.
+
+The same card also offers:
+
+- **Signing secret** *(optional)* — when set, every webhook request carries an `X-SPA-Signature` header: `sha256=<hex>`, the HMAC-SHA256 of the raw JSON body keyed with the secret. The receiver recomputes the HMAC over the exact bytes it received and compares (use a constant-time comparison such as PHP's `hash_equals()`), verifying both authenticity and integrity. Signatures are computed at send time, so retried deliveries re-sign the identical frozen bytes.
+- **History backfill** *(optional, off by default)* — when enabled, an endpoint that has never received a delivery starts from the beginning of the retention window instead of one send interval ago, so an endpoint added months after data collection began still receives everything the site retains. Enabling it after an endpoint has already received deliveries changes nothing for that endpoint.
+
+Each `top_*` list in the payload holds up to **200 rows** (tunable via the `spa_webhook_report_limit` filter) — much deeper than the dashboard's top 10 — so a downstream system aggregating deliveries long-term sees (near-)complete page, click, form, referrer, and campaign rankings per window.
 
 ### Delivery scatter
 
@@ -94,7 +101,7 @@ Example payload:
 ```json
 {
     "source": "sitepulse-analytics",
-    "plugin_version": "1.3.0",
+    "plugin_version": "1.4.0",
     "website_info": {
         "name": "Example Site",
         "url": "https://example.com",
@@ -163,7 +170,7 @@ Example payload:
 
 `analytics.conversions.recent` lists **every** individual confirmed conversion in the delivery window (deduplicated by `conversion_id`), each carrying the attribution snapshot taken **when the conversion occurred** — so a downstream CRM or automation platform never has to search older payloads to attribute a lead. Conversion delivery is **lossless**: a window holding more than 100 conversions is automatically split — the delivery covers a shorter window containing the first 100, and the remainder goes out as the next delivery (consecutive, non-overlapping windows, worked off within the same dispatch run) — so no conversion record is ever skipped by a listing cap. `analytics.channels` and the enriched `analytics.top_campaigns` provide the aggregate view; conversion counts in both are deduplicated by conversion id, and `conversion_rate` is a **session conversion rate** (sessions with at least one conversion ÷ sessions, capped at 100) with the raw `conversions` and `converting_sessions` counts alongside.
 
-Requests are sent with `wp_safe_remote_post()` (endpoints are re-validated at request time) and redirects disabled, and every request carries an `Idempotency-Key` header equal to the payload's `delivery_id`.
+Requests are sent with `wp_safe_remote_post()` (endpoints are re-validated at request time) and redirects disabled, and every request carries an `Idempotency-Key` header equal to the payload's `delivery_id` — plus an `X-SPA-Signature` HMAC header when a signing secret is configured (see above).
 
 A **Send test payload now** button on the settings page delivers the last 7 days to every endpoint immediately (flagged with `"test": true`).
 
@@ -216,6 +223,7 @@ Use this for goals the built-in form integrations can't see — a booking widget
 | --- | --- |
 | `spa_tracked_event` | Inspect/modify an event row before it is stored; return `false` to drop it. Receives `(array $row, string $type)`. |
 | `spa_webhook_payload` | Modify the webhook payload before it is sent. Receives `(array $payload, int $startTs, int $endTs)`. |
+| `spa_webhook_report_limit` | Maximum rows per `top_*` list in the webhook payload (default 200). Receives `(int $limit)`. |
 | `spa_allowed_hosts` | Hostnames accepted in tracked page URLs and `Origin`/`Referer` checks, and treated as internal in referrer reports (default: this site's own hosts). |
 | `spa_client_ip` | Override the client IP used for rate limiting, e.g. to map a trusted reverse-proxy header. |
 | `spa_rate_limits` | Tune ingestion rate limits: `['per_ip' => 300, 'site_wide' => 3000]` events/minute. |
@@ -270,6 +278,13 @@ sitepulse-analytics/
 The plugin checks the [GitHub repository's](https://github.com/Magellan-Web-Dev/SitePulse-Analytics) latest release every 12 hours through WordPress's normal update pipeline. Publishing a release with a tag like `v1.1.0` makes the update banner appear on the Plugins screen; a **Check for updates** row action forces an immediate check. After an update installs, the plugin folder is automatically normalized back to `sitepulse-analytics/` before WordPress reactivates it.
 
 ## Changelog
+
+### 1.4.0
+
+- **HMAC-signed webhooks:** a new optional **Signing secret** (Settings → Webhook Settings). When set, every webhook request — scheduled, retry, or test — carries an `X-SPA-Signature: sha256=<hex>` header, the HMAC-SHA256 of the raw JSON body keyed with the secret, so receivers can verify payloads genuinely came from an authorized installation and were not altered in transit. Signatures are computed at send time, so retries re-sign the identical frozen bytes.
+- **Deep webhook rankings:** every `top_*` list in the webhook payload now holds up to 200 rows instead of 10 (tunable via the new `spa_webhook_report_limit` filter), so downstream systems aggregating deliveries long-term can build (near-)complete page, click, form, hover, referrer, and campaign rankings — an item outside a window's top 10 is no longer invisible to the receiver. The dashboard keeps its top-10 views.
+- **History backfill:** a new optional **History backfill** setting. When enabled, an endpoint that has never received a delivery starts from the beginning of the retention window instead of one send interval ago, so an endpoint configured after weeks of local collection still receives the full retained history.
+- **Interval-sized catch-up windows:** an endpoint catching up on a gap longer than one send interval (downtime, a paused Webhook Status toggle, or a backfilled first send) now receives consecutive interval-sized windows — at most 10 per dispatch run, resuming next run — instead of one coarse window covering the whole gap, so per-window granularity (daily rankings, session counts) is preserved through outages and backfills.
 
 ### 1.3.0
 
