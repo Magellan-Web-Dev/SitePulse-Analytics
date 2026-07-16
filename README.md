@@ -2,7 +2,7 @@
 
 A self-hosted visitor analytics plugin for WordPress. SitePulse tracks page views, link and button clicks, form submissions, **confirmed form conversions with campaign attribution**, mouse hover activity, and scroll depth, then surfaces everything inside the WordPress dashboard — making it easy to identify popular pages, which campaigns and channels actually produce leads, and the areas of your content visitors engage with. On a configurable schedule, aggregated analytics (including individual attributed conversions) can also be delivered as JSON `POST` requests to one or more webhook endpoints.
 
-- **Version:** 1.4.0
+- **Version:** 1.5.0
 - **Requires WordPress:** 6.3+
 - **Requires PHP:** 8.1+
 - **License:** GPL-2.0-or-later
@@ -19,7 +19,7 @@ A self-hosted visitor analytics plugin for WordPress. SitePulse tracks page view
 - **Hover tracking** — records when a visitor's pointer rests on an interactive element or image for a configurable dwell time (default 800 ms), once per element per page view. Add `data-spa-hover` to any element to opt it into hover tracking.
 - **Scroll depth** — 25/50/75/100% milestones, once each per page view.
 - **Custom server-side events** — record anything else with `spa_track_event()`.
-- **Dashboard analytics** — summary cards, a daily page-view chart, top pages, top landing pages, top clicked elements, top forms, most-hovered elements, top referrers, campaign performance (sessions, conversions, session conversion rate), a keyword/creative drilldown (`utm_term` / `utm_content`), a channel breakdown, a device breakdown, and a recent-activity feed, filterable by 7/30/90-day periods (calendar days, UTC).
+- **Dashboard analytics** — summary cards, an accessible daily page-view chart (single-Tab-stop keyboard navigation, touch/mouse tooltips, visible axes, and a data-table fallback), a print-optimized **Print / Save as PDF** report view, top pages, top landing pages, top clicked elements, top forms, most-hovered elements, top referrers, campaign performance (sessions, conversions, session conversion rate), a keyword/creative drilldown (`utm_term` / `utm_content`), a channel breakdown, a device breakdown, and a recent-activity feed. Reports are grouped into an always-visible Overview plus collapsible Content, Engagement, Acquisition, Devices, and Recent Activity sections, filterable by 7/30/90-day periods (calendar days, UTC, with the exact date range shown).
 - **Webhook delivery** — aggregated analytics sent as JSON to **any number of endpoints** on an hourly, twice-daily, daily, or weekly schedule, with per-endpoint delivery windows, optional **HMAC-signed requests**, optional **history backfill** for newly added endpoints, automatic retries on failure, a manual test-send button, and a delivery log. Conversion delivery is **lossless**: windows holding more than 100 individual conversions are split into consecutive deliveries instead of dropping the overflow.
 - **Bounded storage** — a daily cleanup cron deletes events older than the configured retention window (default 90 days, adjustable 7–365).
 - **GitHub-powered updates** — new releases published to the GitHub repository appear as standard update notifications on the Plugins screen.
@@ -57,12 +57,12 @@ The endpoint defends itself in layers: it accepts only whitelisted, currently-en
 
 ## Dashboard
 
-**SitePulse** (top-level admin menu) shows, for the selected 7/30/90-day period:
+**SitePulse** (top-level admin menu) shows, for the selected 7/30/90-day period (UTC calendar days — the exact date range is displayed next to the period selector, and the current day is marked as still collecting). Reports are grouped into an always-visible **Overview** plus collapsible **Content**, **Engagement**, **Acquisition**, **Devices**, and **Recent Activity** sections — native, keyboard-accessible panels that keep the page scannable without hiding any report. Expand all / Collapse all controls sit above the panels, each panel remembers its open/closed state for the browsing session (including across period changes), and a **Print / Save as PDF** button produces a print-optimized report of the selected period through the browser's native print dialog, expanding every section and chart value automatically:
 
 | Section | What it tells you |
 | --- | --- |
-| Summary cards | Totals for page views, clicks, form submit attempts, confirmed conversions, hovers, and scroll milestones |
-| Daily Page Views | A bar chart of traffic over the period |
+| Summary cards | Totals for page views, clicks, form submit attempts, confirmed conversions, hovers, and scroll milestones — with short explanations under the less obvious metrics |
+| Daily Page Views | An accessible bar chart of traffic over the period: every day is reachable by mouse, keyboard (one Tab stop, then Arrow/Home/End/Page keys), or touch with an exact-count tooltip, framed by a pinned Y-axis scale and date labels, with a total / average-per-completed-day / busiest-day summary, a patterned marker for the still-collecting current day (visible even at zero views), and a "View data table" fallback that works without JavaScript. Dense 30/90-day views scroll horizontally behind a pinned Y-axis so every day keeps at least a 14px interaction width |
 | Top Pages | Most-viewed pages with view and session counts (sessions use a 30-minute inactivity window) |
 | Top Landing Pages | The first page of each session that started in the period — where visitors actually arrive |
 | Top Clicked Elements | Which links and buttons visitors click most — your conversion actions |
@@ -70,10 +70,10 @@ The endpoint defends itself in layers: it accepts only whitelisted, currently-en
 | Most Hovered Elements | Where visitor attention lingers |
 | Top Referrers | Which external sites and pages send you traffic |
 | Campaigns | Sessions, views, confirmed conversions, and session conversion rate (sessions with ≥ 1 conversion ÷ sessions) per `utm_source` / `utm_medium` / `utm_campaign` / `utm_id`. Attribution is last-touch within the session: the most recent tagged landing attributes the visit from that point on, and untagged pages inherit it |
-| Campaign Terms & Content | Keyword (`utm_term`) and creative (`utm_content`) performance with campaign context — shown when the period contains traffic carrying those tags |
+| Campaign Terms & Content | Keyword (`utm_term`) and creative (`utm_content`) performance with campaign context — always listed, with an explanatory empty state when the period has no traffic carrying those tags |
 | Channels | Sessions, views, confirmed conversions, and session conversion rate per marketing channel (Paid Search, Organic Social, Email, Referral, Direct, …), classified at ingestion |
 | Devices | Mobile vs desktop share of page views |
-| Recent Activity | The latest raw events, for verifying tracking is working |
+| Recent Activity | The latest 15 raw events — independent of the selected period, shown in the site timezone using the site's date/time display settings — for verifying tracking is working |
 
 ## Webhooks
 
@@ -101,7 +101,7 @@ Example payload:
 ```json
 {
     "source": "sitepulse-analytics",
-    "plugin_version": "1.4.0",
+    "plugin_version": "1.5.0",
     "website_info": {
         "name": "Example Site",
         "url": "https://example.com",
@@ -243,8 +243,10 @@ sitepulse-analytics/
 ├── uninstall.php                # Complete cleanup on plugin deletion
 ├── README.md
 ├── assets/
-│   ├── css/admin.css            # Dashboard, settings & delivery log styles
+│   ├── css/admin.css            # Shared settings, about & delivery log styles
+│   ├── css/dashboard.css        # Dashboard-only styles, incl. the print layout
 │   ├── js/admin.js              # Settings page webhook endpoint repeater
+│   ├── js/dashboard.js          # Dashboard page (chart navigation & tooltips, panel state, print prep)
 │   ├── js/delivery-log.js       # Delivery Log page (accordions, pagination, API card)
 │   └── js/tracker.js            # Frontend interaction tracker
 └── src/
@@ -278,6 +280,21 @@ sitepulse-analytics/
 The plugin checks the [GitHub repository's](https://github.com/Magellan-Web-Dev/SitePulse-Analytics) latest release every 12 hours through WordPress's normal update pipeline. Publishing a release with a tag like `v1.1.0` makes the update banner appear on the Plugins screen; a **Check for updates** row action forces an immediate check. After an update installs, the plugin folder is automatically normalized back to `sitepulse-analytics/` before WordPress reactivates it.
 
 ## Changelog
+
+### 1.5.0
+
+Dashboard UI refactor — no tracking, database, webhook, or reporting-semantics changes; all reports, calculations, period choices, permissions, and empty states are preserved.
+
+- **Sectioned layout:** the dashboard is now organized into an always-visible **Overview** (summary cards + chart) followed by collapsible **Content**, **Engagement**, **Acquisition**, **Devices**, and **Recent Activity** panels. Panels are native `<details>` elements — keyboard accessible with no JavaScript — and each section and ambiguous table carries a short plain-language description. With JavaScript, **Expand all / Collapse all** controls appear above the panels, and each panel's open/closed state is remembered for the browsing session (`sessionStorage`, panel ids and booleans only — no analytics or user data), so the layout survives switching between the 7/30/90-day periods. The controls disable themselves when every panel is already open (or closed).
+- **Accessible daily page-view chart:** the CSS-only bar chart (values hidden in `title` attributes) is replaced by a dependency-free chart where every day is a real button reachable by mouse hover, keyboard focus, and touch, with a custom tooltip showing the formatted date and exact count, a visible Y-axis scale, spaced X-axis date labels (every day at 7 days, spaced markers at 30/90, edge labels never clipped), a total / average-per-completed-day / busiest-day summary, a patterned bar plus a baseline tick for the still-collecting current day (visible even on a zero-view day), true zero-height bars for zero-view days, an accessible "View data table" fallback that works without JavaScript, and `prefers-reduced-motion` support. With JavaScript, the chart is a **single Tab stop** with roving focus — Left/Right Arrow move between days, Home/End jump to the first/latest day, Page Up/Down jump a week, moving focus scrolls the day into view and updates the tooltip, Escape dismisses the tooltip without losing focus, and concise screen-reader instructions describe the keys. Pointer handling is flicker-free, taps select a day (a second tap on it dismisses, as does tapping outside the chart), and only one tooltip can ever be active — clamped to the visible area so it is never clipped at a scrolled edge or hidden under the pinned Y-axis. The 30/90-day views keep a minimum interaction width of 14px per day by letting the plot grow and scroll horizontally behind the pinned Y-axis instead of squeezing 90 targets into the viewport (still narrower than a fingertip — the data table remains the precise alternative).
+- **Chart average:** the summary shows **Avg per completed day** — today is excluded from the average while it is still collecting (with a clear fallback when no completed days exist yet). The total still includes today, and the underlying daily report and webhook data are unchanged.
+- **Period selector:** the pipe-separated 7/30/90-day links are now a WordPress-style segmented button group with `aria-current="page"` on the active choice, the exact UTC start–end dates displayed, and a note that the current day is still collecting data. At narrow widths the group becomes equal-width segments that fill the row instead of overflowing. Query-string behavior is unchanged.
+- **Summary cards:** stronger metric/label hierarchy, equal-height responsive grid, and concise explanations under Form Submit Attempts, Confirmed Conversions, and Scroll Milestones.
+- **Report tables:** horizontal-scroll containers for wide tables (Campaigns and Campaign Terms & Content keep readable column widths), right-aligned counts with tabular numerals, readable hostname/path display for long URLs with the full URL kept as the link, a screen-reader caption naming every table, and a single-column layout at narrower widths. Page/referrer/destination values become links only after display-safe validation — an explicit `http(s)` scheme and a well-formed host, with this site's own hosts always accepted so local/staging/intranet installs keep their links (`mailto:`/`tel:` stay plain text); every link opens in a new tab with one consistent visible indicator and a single concise screen-reader announcement that also flags off-site destinations. Ranking tables state that they show up to 10 rows (Channels and Devices are complete breakdowns, not top-10 lists), and **Campaign Terms & Content** now always renders — with an explanatory empty state instead of silently disappearing when no `utm_term`/`utm_content` traffic exists. All empty-state messages are retained.
+- **Recent Activity:** now labeled as the latest 15 events independent of the selected period, with human-readable event names, times converted to the site timezone and formatted with the site's own date/time display settings (timezone clearly labeled, including plain UTC-offset configurations), and clickable page references. The underlying query is unchanged.
+- **Localized dates:** human-readable chart and period dates are rendered through WordPress's localized date functions while staying pinned to UTC, so they translate with the site language without shifting the reporting boundaries.
+- **Print / Save as PDF:** a dependency-free, print-optimized report view. The **Print / Save as PDF** button opens the browser's native print dialog (where "Save as PDF" produces the file); before printing, every panel and the chart's data table are expanded automatically and restored afterwards — this also works for the browser's own File → Print. The printed report covers the currently selected 7/30/90-day period with a header naming the site, date range, timezone, and generation time; hides admin chrome, controls, notices, and tooltips — except the rate-limit data-quality warning, which stays in the printout because it flags that the numbers may undercount; removes scroll containers; uses landscape orientation for the wide campaign tables; keeps headings with their content, avoids splitting rows and cards across pages, repeats table headers on new pages; preserves chart colors (`print-color-adjust: exact`); includes exact daily values via the expanded data table; and prints each link's destination URL, since a PDF can't follow "opens in a new tab."
+- **Implementation:** new `assets/js/dashboard.js` (chart navigation and tooltips, panel state, print preparation — enqueued solely on the dashboard screen) and new `assets/css/dashboard.css` carrying all dashboard and print styles, also loaded only on the dashboard so the other plugin screens no longer download them; styles scoped under `.spa-dash`, repeated table markup extracted into small rendering helpers, and all dynamic output escaped per WordPress standards.
 
 ### 1.4.0
 

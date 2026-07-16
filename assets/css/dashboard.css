@@ -1,0 +1,715 @@
+/**
+ * SitePulse Analytics — analytics dashboard styles.
+ *
+ * Loaded only on the main SitePulse dashboard screen (the shared admin.css
+ * carries the styles common to all plugin pages). Everything here is scoped
+ * to .spa-dash, and the print block turns the page into a clean report for
+ * the browser's Print / Save as PDF flow.
+ */
+
+/* ==========================================================================
+   Analytics dashboard. Everything below in this block is scoped to
+   .spa-dash so the Settings, About, and Delivery Log screens are unaffected.
+   ========================================================================== */
+
+/* ── Period selector ──────────────────────────────────────────────────────── */
+
+.spa-dash .spa-period {
+    margin: 16px 0 4px;
+}
+
+.spa-dash .spa-period-group {
+    display: inline-flex;
+    border: 1px solid #2271b1;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.spa-dash .spa-period-btn {
+    display: inline-flex;
+    align-items: center;
+    min-height: 32px;
+    padding: 0 14px;
+    background: #fff;
+    color: #2271b1;
+    text-decoration: none;
+    font-size: 13px;
+    line-height: 1;
+    border-right: 1px solid #2271b1;
+}
+
+.spa-dash .spa-period-btn:last-child {
+    border-right: none;
+}
+
+.spa-dash .spa-period-btn:hover {
+    background: #f0f6fc;
+    color: #135e96;
+}
+
+.spa-dash .spa-period-btn:focus-visible {
+    outline: 2px solid #043959;
+    outline-offset: -2px;
+    box-shadow: none;
+}
+
+.spa-dash .spa-period-btn.is-active {
+    background: #2271b1;
+    color: #fff;
+    font-weight: 600;
+}
+
+.spa-dash .spa-period-range {
+    margin: 8px 0 0;
+    color: #646970;
+}
+
+/* ── Overview: summary cards ──────────────────────────────────────────────── */
+
+.spa-dash .spa-overview h2 {
+    margin: 24px 0 4px;
+}
+
+.spa-dash .spa-cards {
+    align-items: stretch;
+}
+
+.spa-dash .spa-card {
+    display: flex;
+    flex-direction: column;
+}
+
+.spa-dash .spa-card-value {
+    font-size: 32px;
+    font-weight: 600;
+    line-height: 1.15;
+    color: #1d2327;
+    font-variant-numeric: tabular-nums;
+}
+
+.spa-dash .spa-card-label {
+    margin-top: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #3c434a;
+    text-transform: uppercase;
+    letter-spacing: 0.02em;
+}
+
+.spa-dash .spa-card-desc {
+    margin-top: 6px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: #646970;
+}
+
+/* ── Overview: daily page-view chart ──────────────────────────────────────── */
+
+.spa-dash .spa-chart-frame {
+    background: #fff;
+    border: 1px solid #dcdcde;
+    border-radius: 8px;
+    padding: 16px 20px 12px;
+    margin-top: 16px;
+}
+
+.spa-dash .spa-chart-frame h3 {
+    margin: 0 0 8px;
+}
+
+.spa-dash .spa-chart-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px 20px;
+    margin: 0 0 14px;
+    color: #646970;
+    font-size: 13px;
+}
+
+.spa-dash .spa-chart-summary strong {
+    color: #1d2327;
+    font-variant-numeric: tabular-nums;
+}
+
+.spa-dash .spa-chart-key {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+}
+
+.spa-dash .spa-chart-key-swatch {
+    width: 14px;
+    height: 14px;
+    border-radius: 2px;
+    background: repeating-linear-gradient(45deg, #2271b1 0 3px, #a7c7e7 3px 6px);
+}
+
+.spa-dash .spa-chart-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.spa-dash .spa-chart-layout {
+    display: flex;
+    gap: 8px;
+}
+
+/* Keep 30/90-day bars usable: every day keeps at least a 14px interaction
+   width and the wrapper above scrolls horizontally instead of squeezing 90
+   targets into the visible viewport. */
+.spa-dash .spa-chart-layout--30 {
+    min-width: 640px;
+}
+
+.spa-dash .spa-chart-layout--90 {
+    min-width: 1400px;
+}
+
+.spa-dash .spa-chart-layout--30 .spa-chart-col,
+.spa-dash .spa-chart-layout--90 .spa-chart-col {
+    min-width: 14px;
+}
+
+/* The Y-axis stays pinned while the plot scrolls horizontally. */
+.spa-dash .spa-chart-yaxis {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    height: 200px;
+    text-align: right;
+    font-size: 11px;
+    color: #646970;
+    font-variant-numeric: tabular-nums;
+    flex-shrink: 0;
+    position: sticky;
+    left: 0;
+    z-index: 2;
+    background: #fff;
+    padding-right: 6px;
+}
+
+.spa-dash .spa-chart-yaxis span:first-child {
+    transform: translateY(-50%);
+}
+
+.spa-dash .spa-chart-yaxis span:last-child {
+    transform: translateY(50%);
+}
+
+.spa-dash .spa-chart-main {
+    flex: 1;
+    min-width: 0;
+}
+
+.spa-dash .spa-chart-plot {
+    position: relative;
+    height: 200px;
+    border-bottom: 1px solid #8c8f94;
+    background-image: linear-gradient(#e5e5e5, #e5e5e5), linear-gradient(#e5e5e5, #e5e5e5);
+    background-size: 100% 1px, 100% 1px;
+    background-position: 0 0, 0 50%;
+    background-repeat: no-repeat;
+}
+
+.spa-dash .spa-chart-cols {
+    display: flex;
+    align-items: flex-end;
+    height: 100%;
+    gap: 2px;
+}
+
+.spa-dash .spa-chart-layout--90 .spa-chart-cols {
+    gap: 1px;
+}
+
+.spa-dash .spa-chart-col {
+    position: relative;
+    flex: 1 1 0;
+    min-width: 4px;
+    height: 100%;
+    display: flex;
+    align-items: flex-end;
+    margin: 0;
+    padding: 0;
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    appearance: none;
+}
+
+.spa-dash .spa-chart-col:focus-visible {
+    outline: 2px solid #043959;
+    outline-offset: 1px;
+}
+
+.spa-dash .spa-chart-bar {
+    display: block;
+    width: 100%;
+    height: var(--spa-h, 0%);
+    background: #2271b1;
+    border-radius: 2px 2px 0 0;
+    transition: background-color 0.15s ease-in-out;
+}
+
+.spa-dash .spa-chart-col:hover .spa-chart-bar,
+.spa-dash .spa-chart-col:focus-visible .spa-chart-bar {
+    background: #135e96;
+}
+
+/* The current, still-collecting day is patterned, not just re-colored. */
+.spa-dash .spa-chart-col.is-today .spa-chart-bar {
+    background: repeating-linear-gradient(45deg, #2271b1 0 4px, #a7c7e7 4px 8px);
+}
+
+.spa-dash .spa-chart-col.is-today:hover .spa-chart-bar,
+.spa-dash .spa-chart-col.is-today:focus-visible .spa-chart-bar {
+    background: repeating-linear-gradient(45deg, #135e96 0 4px, #7ba7cc 4px 8px);
+}
+
+/* A tick on the baseline marks today even when its (still zero-height) bar
+   has nothing to show yet — the data bar itself stays truly zero. */
+.spa-dash .spa-chart-col.is-today::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: -4px;
+    height: 4px;
+    border-radius: 1px;
+    background: repeating-linear-gradient(45deg, #2271b1 0 3px, #a7c7e7 3px 6px);
+}
+
+.spa-dash .spa-chart-xaxis {
+    position: relative;
+    height: 20px;
+    margin-top: 4px;
+    font-size: 11px;
+    color: #646970;
+}
+
+.spa-dash .spa-chart-xlabel {
+    position: absolute;
+    left: var(--spa-x, 0%);
+    transform: translateX(-50%);
+    white-space: nowrap;
+}
+
+/* The first and last labels hug their edges instead of being half-clipped. */
+.spa-dash .spa-chart-xlabel:first-child {
+    transform: translateX(0);
+}
+
+.spa-dash .spa-chart-xlabel:last-child {
+    transform: translateX(-100%);
+}
+
+.spa-dash .spa-chart-tip {
+    position: absolute;
+    top: 6px;
+    transform: translateX(-50%);
+    background: #1d2327;
+    color: #fff;
+    border-radius: 4px;
+    padding: 6px 10px;
+    font-size: 12px;
+    line-height: 1.45;
+    pointer-events: none;
+    white-space: nowrap;
+    z-index: 10;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+}
+
+.spa-dash .spa-chart-tip-date {
+    display: block;
+    font-weight: 600;
+}
+
+.spa-dash .spa-chart-tip-count {
+    display: block;
+    font-variant-numeric: tabular-nums;
+}
+
+.spa-dash .spa-chart-data {
+    margin-top: 12px;
+}
+
+.spa-dash .spa-chart-data > summary {
+    display: inline-block;
+    cursor: pointer;
+    color: #2271b1;
+    font-size: 13px;
+    padding: 4px 2px;
+}
+
+.spa-dash .spa-chart-data > summary:hover {
+    color: #135e96;
+}
+
+.spa-dash .spa-chart-data > summary:focus-visible {
+    outline: 2px solid #043959;
+    outline-offset: 1px;
+}
+
+.spa-dash .spa-chart-data-table {
+    max-width: 420px;
+    margin-top: 8px;
+}
+
+/* ── Collapsible report sections ──────────────────────────────────────────── */
+
+/* Revealed by dashboard.js; keep hidden even though the class sets flex. */
+.spa-dash .spa-panel-toolbar[hidden] {
+    display: none;
+}
+
+.spa-dash .spa-panel-toolbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin: 24px 0 -8px;
+}
+
+.spa-dash .spa-print-btn {
+    margin-left: auto;
+}
+
+.spa-dash .spa-panel {
+    background: #fff;
+    border: 1px solid #c3c4c7;
+    border-radius: 4px;
+    margin-top: 20px;
+    box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
+}
+
+.spa-dash .spa-panel-summary {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 20px;
+    cursor: pointer;
+    list-style: none;
+}
+
+.spa-dash .spa-panel-summary::-webkit-details-marker {
+    display: none;
+}
+
+.spa-dash .spa-panel-summary h2 {
+    flex: 1;
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: #1d2327;
+}
+
+.spa-dash .spa-panel-summary:hover {
+    background: #f6f7f7;
+}
+
+.spa-dash .spa-panel-summary:focus-visible {
+    outline: 2px solid #043959;
+    outline-offset: -2px;
+}
+
+.spa-dash .spa-panel-arrow {
+    font-size: 10px;
+    color: #757575;
+    transition: transform 0.2s ease;
+}
+
+.spa-dash .spa-panel[open] > .spa-panel-summary {
+    border-bottom: 1px solid #f0f0f1;
+}
+
+.spa-dash .spa-panel[open] > .spa-panel-summary .spa-panel-arrow {
+    transform: rotate(180deg);
+}
+
+.spa-dash .spa-panel-body {
+    padding: 4px 20px 20px;
+}
+
+.spa-dash .spa-panel-desc {
+    margin: 10px 0 0;
+    color: #646970;
+}
+
+/* ── Report tables ────────────────────────────────────────────────────────── */
+
+.spa-dash .spa-tables {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0 24px;
+}
+
+.spa-dash .spa-report {
+    margin-top: 20px;
+    min-width: 0;
+}
+
+.spa-dash .spa-report--wide {
+    grid-column: 1 / -1;
+}
+
+.spa-dash .spa-report h3 {
+    margin: 0 0 4px;
+    font-size: 14px;
+}
+
+.spa-dash .spa-report-desc {
+    margin: 0 0 8px;
+    color: #646970;
+    font-size: 12px;
+}
+
+.spa-dash .spa-table-scroll {
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
+}
+
+.spa-dash .spa-table-scroll table {
+    font-variant-numeric: tabular-nums;
+}
+
+/* Many-column tables (Campaigns, Campaign Terms & Content) keep readable
+   column widths; the scroll container above takes over when space runs out. */
+.spa-dash .spa-report--wide table {
+    min-width: 720px;
+}
+
+.spa-dash th.spa-num,
+.spa-dash td.spa-num {
+    text-align: right;
+    white-space: nowrap;
+}
+
+.spa-dash .spa-table-scroll td {
+    word-break: break-word;
+    overflow-wrap: anywhere;
+}
+
+.spa-dash .spa-url-sub {
+    display: block;
+    font-size: 11px;
+    color: #646970;
+}
+
+/* Every new-tab link gets the same visible indicator, on-site or off. */
+.spa-dash .spa-newtab {
+    color: #646970;
+    font-size: 11px;
+    margin-left: 3px;
+    text-decoration: none;
+    display: inline-block;
+}
+
+/* ── Responsive ───────────────────────────────────────────────────────────── */
+
+@media screen and (max-width: 1100px) {
+    .spa-dash .spa-tables {
+        grid-template-columns: minmax(0, 1fr);
+    }
+}
+
+@media screen and (max-width: 782px) {
+    .spa-dash .spa-period-btn {
+        min-height: 40px;
+        padding: 0 16px;
+    }
+
+    /* Equal-width segments that fill the row instead of overflowing it. */
+    .spa-dash .spa-period-group {
+        display: flex;
+        width: 100%;
+        max-width: 420px;
+    }
+
+    .spa-dash .spa-period-btn {
+        flex: 1 1 0;
+        justify-content: center;
+        padding: 0 8px;
+    }
+
+    .spa-dash .spa-card-value {
+        font-size: 26px;
+    }
+
+    .spa-dash .spa-panel-summary {
+        padding: 14px 16px;
+    }
+
+    .spa-dash .spa-panel-body {
+        padding: 4px 16px 16px;
+    }
+}
+
+@media screen and (max-width: 480px) {
+    .spa-dash .spa-cards {
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px;
+    }
+
+    .spa-dash .spa-card {
+        padding: 14px;
+    }
+
+    .spa-dash .spa-chart-frame {
+        padding: 12px;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    .spa-dash .spa-chart-bar,
+    .spa-dash .spa-panel-arrow {
+        transition: none;
+    }
+}
+
+/* ── Print / Save as PDF ──────────────────────────────────────────────────── */
+
+/* Report metadata line (site, range, generated-at): print only. */
+.spa-print-meta {
+    display: none;
+}
+
+@media print {
+    /* Landscape suits the wide Campaigns tables; override in the dialog if
+       portrait is preferred. */
+    @page {
+        size: landscape;
+        margin: 12mm;
+    }
+
+    /* Hide wp-admin chrome and screen-only controls. The period *controls*
+       go, but .spa-period itself stays: it carries the print-only report
+       metadata line. The rate-limit warning also stays — it tells the PDF
+       reader the numbers may undercount. */
+    #adminmenumain,
+    #adminmenuback,
+    #adminmenuwrap,
+    #wpadminbar,
+    #wpfooter,
+    #screen-meta,
+    #screen-meta-links,
+    .spa-dash .notice:not(.spa-rate-limit-notice),
+    .spa-dash .spa-period-group,
+    .spa-dash .spa-period-range,
+    .spa-dash .spa-panel-toolbar,
+    .spa-dash .spa-chart-tip,
+    .spa-dash .spa-panel-arrow,
+    .spa-dash .spa-newtab {
+        display: none !important;
+    }
+
+    /* Data-quality warning, print-friendly: bordered, no tinted background. */
+    .spa-dash .notice.spa-rate-limit-notice {
+        background: #fff;
+        border: 1px solid #dba617;
+        border-left-width: 4px;
+        box-shadow: none;
+        margin: 8px 0 12px;
+        padding: 8px 12px;
+    }
+
+    #wpcontent,
+    #wpbody-content {
+        margin-left: 0 !important;
+        padding-left: 0 !important;
+    }
+
+    html.wp-toolbar {
+        padding-top: 0 !important;
+    }
+
+    .spa-print-meta {
+        display: block;
+        margin: 4px 0 12px;
+        font-size: 12px;
+        color: #1d2327;
+    }
+
+    /* Panels print as plain, always-visible sections (dashboard.js expands
+       them before printing; without JavaScript, closed panels stay closed). */
+    .spa-dash .spa-panel {
+        border: none;
+        box-shadow: none;
+        margin-top: 16px;
+    }
+
+    .spa-dash .spa-panel-summary {
+        padding: 0 0 4px;
+        cursor: default;
+    }
+
+    .spa-dash .spa-panel-summary:hover {
+        background: transparent;
+    }
+
+    .spa-dash .spa-panel-body {
+        padding: 0;
+    }
+
+    /* No scroll containers on paper — content flows to the page width. */
+    .spa-dash .spa-table-scroll,
+    .spa-dash .spa-chart-scroll {
+        overflow: visible;
+    }
+
+    .spa-dash .spa-report--wide table {
+        min-width: 0;
+    }
+
+    .spa-dash .spa-chart-layout--30,
+    .spa-dash .spa-chart-layout--90 {
+        min-width: 0;
+    }
+
+    .spa-dash .spa-chart-layout--30 .spa-chart-col,
+    .spa-dash .spa-chart-layout--90 .spa-chart-col {
+        min-width: 1px;
+    }
+
+    /* Pagination: keep headings with their content, keep rows and cards
+       whole, and repeat table headers on every page. */
+    .spa-dash h2,
+    .spa-dash h3 {
+        break-after: avoid;
+        page-break-after: avoid;
+    }
+
+    .spa-dash tr,
+    .spa-dash .spa-card {
+        break-inside: avoid;
+        page-break-inside: avoid;
+    }
+
+    .spa-dash thead {
+        display: table-header-group;
+    }
+
+    .spa-dash .spa-chart-scroll {
+        break-inside: avoid;
+        page-break-inside: avoid;
+    }
+
+    /* Chart colors and the today markers must survive on paper. */
+    .spa-dash .spa-chart-bar,
+    .spa-dash .spa-chart-key-swatch,
+    .spa-dash .spa-chart-col.is-today::after {
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+    }
+
+    /* A printed page can't follow a link or announce "opens in a new tab":
+       print each destination next to its link text instead. */
+    .spa-dash .spa-report a[href^="http"]::after {
+        content: " (" attr(href) ")";
+        font-size: 9px;
+        color: #646970;
+        word-break: break-all;
+    }
+
+    .spa-dash .spa-url-sub {
+        display: none;
+    }
+}

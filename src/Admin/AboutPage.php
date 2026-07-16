@@ -184,7 +184,7 @@ final class AboutPage
     {
         $sections = [
             'Summary cards'         => 'Totals for page views, clicks, form submit attempts, confirmed conversions, hovers, and scroll milestones over the selected period.',
-            'Daily Page Views'      => 'A bar chart of traffic across the period, for spotting trends and spikes.',
+            'Daily Page Views'      => 'An accessible bar chart of traffic across the period — the chart is a single Tab stop (Arrow, Home/End, and Page keys move between days) and every day is also reachable by mouse or touch with an exact-count tooltip, framed by a visible scale and date axis. The summary shows the total, the average per completed day (the still-collecting current day is excluded from the average and marked on the chart), and the busiest day, with a "View data table" fallback. Dense 30/90-day views scroll horizontally behind a pinned scale so every day keeps a consistent minimum width.',
             'Top Pages'             => 'Most-viewed pages with view and unique-session counts.',
             'Top Landing Pages'        => 'The first page of each session that started in the period — where visitors actually arrive.',
             'Top Clicked Elements'     => 'Which links and buttons visitors click most — your conversion actions.',
@@ -192,16 +192,26 @@ final class AboutPage
             'Most Hovered Elements'    => 'Where visitor attention lingers before (or without) a click.',
             'Top Referrers'            => 'Which external sites and pages send you traffic.',
             'Campaigns'                => 'Sessions, views, confirmed conversions, and session conversion rate (sessions with at least one conversion ÷ sessions) per utm source/medium/campaign/id — last-touch within the session: the most recent tagged landing attributes the visit from that point on, and untagged pages inherit it.',
-            'Campaign Terms & Content' => 'Keyword (utm_term) and creative (utm_content) performance with campaign context — shown when the period contains traffic carrying those tags.',
+            'Campaign Terms & Content' => 'Keyword (utm_term) and creative (utm_content) performance with campaign context — always listed, with an explanatory empty state when the period has no traffic carrying those tags.',
             'Channels'                 => 'Sessions, views, confirmed conversions, and session conversion rate per marketing channel (Paid Search, Organic Social, Email, Referral, Direct, …), classified as events arrive.',
             'Devices'                  => 'Mobile versus desktop share of page views.',
-            'Recent Activity'          => 'The latest raw events, useful for verifying tracking is working.',
+            'Recent Activity'          => 'The latest 15 events (independent of the selected period, shown in the site timezone using the site\'s date and time display settings), useful for verifying tracking is working.',
         ];
 
         echo '<div class="spa-card">';
         echo '<h2 class="spa-card-title">The Dashboard</h2>';
         echo '<p>The <a href="' . esc_url(self_admin_url('admin.php?page=' . DashboardPage::MENU_SLUG)) . '">SitePulse dashboard</a> '
-            . 'shows the following for a selectable 7, 30, or 90-day period:</p>';
+            . 'shows the following for a selectable 7, 30, or 90-day period (UTC calendar days; the exact date range is '
+            . 'shown next to the period selector). Reports are grouped into an always-visible <strong>Overview</strong> '
+            . '(summary cards and an accessible, keyboard-navigable daily page-view chart with a data-table fallback) '
+            . 'followed by collapsible <strong>Content</strong>, <strong>Engagement</strong>, <strong>Acquisition</strong>, '
+            . '<strong>Devices</strong>, and <strong>Recent Activity</strong> sections, so the page stays scannable '
+            . 'without hiding any report. Expand-all/collapse-all controls sit above the sections, each section '
+            . 'remembers whether you left it open or closed for the rest of your browsing session — including across '
+            . 'period changes — and a <strong>Print / Save as PDF</strong> button turns the selected period into a '
+            . 'print-optimized report through your browser\'s print dialog (choose "Save as PDF" there), expanding '
+            . 'every section and the chart\'s exact daily values automatically — and keeping any data-quality '
+            . 'warning in the printout:</p>';
 
         echo '<table class="spa-about-table">';
         echo '<thead><tr><th>Section</th><th>What it tells you</th></tr></thead><tbody>';
@@ -367,7 +377,7 @@ final class AboutPage
         echo '<pre class="spa-about-code">' . esc_html(
             (string) wp_json_encode([
                 'source'         => 'sitepulse-analytics',
-                'plugin_version' => defined('SPA_VERSION') ? SPA_VERSION : '1.4.0',
+                'plugin_version' => defined('SPA_VERSION') ? SPA_VERSION : '1.5.0',
                 'website_info'   => [
                     'name'   => get_bloginfo('name'),
                     'url'    => home_url(),
