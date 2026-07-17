@@ -34,6 +34,9 @@ final class SettingsPage
     /** @var string Admin action name for the manual test send. */
     private const TEST_ACTION = 'spa_send_test_webhook';
 
+    /** @var string Admin action name for discarding one pending webhook retry. */
+    private const DISCARD_ACTION = 'spa_discard_retry';
+
     /**
      * Registers menu, settings, and test-send hooks.
      *
@@ -44,7 +47,9 @@ final class SettingsPage
         add_action('admin_menu', [self::class, 'addMenu']);
         add_action('admin_init', [self::class, 'registerSettings']);
         add_action('admin_init', [self::class, 'handleTestSend']);
+        add_action('admin_init', [self::class, 'handleDiscardRetry']);
         add_action('admin_notices', [self::class, 'maybeShowTestNotice']);
+        add_action('admin_notices', [self::class, 'maybeShowDiscardNotice']);
         add_action('admin_enqueue_scripts', [self::class, 'enqueueAssets']);
     }
 
@@ -138,8 +143,21 @@ final class SettingsPage
         $out['client_id']         = mb_substr(sanitize_text_field((string) ($input['client_id'] ?? '')), 0, 190);
         $out['website_id']        = mb_substr(sanitize_text_field((string) ($input['website_id'] ?? '')), 0, 190);
 
-        // The webhook repeater submits webhooks[][url] / webhooks[][label].
+        // The webhook repeater submits webhooks[][url] / [label] / [secret].
         $raw = is_array($input['webhooks'] ?? null) ? $input['webhooks'] : [];
+
+        /**
+         * Filters whether plain-HTTP webhook endpoints may be saved.
+         *
+         * Off by default: webhook payloads carry visitor analytics and are
+         * HMAC-signed, and both are exposed to any on-path observer over
+         * plain HTTP. Return true only for development setups (e.g. a local
+         * receiver without TLS).
+         *
+         * @param bool $allow Whether http:// endpoint URLs are accepted.
+         */
+        $allowInsecure = (bool) apply_filters('spa_allow_insecure_webhooks', false);
+        $schemes       = $allowInsecure ? ['http', 'https'] : ['https'];
 
         $webhooks = [];
         $seen     = [];
@@ -149,15 +167,28 @@ final class SettingsPage
                 continue;
             }
 
-            $url = esc_url_raw($rawUrl, ['http', 'https']);
+            if (!$allowInsecure && stripos($rawUrl, 'http://') === 0) {
+                add_settings_error(
+                    Options::OPTION_KEY,
+                    'spa_insecure_webhook',
+                    sprintf(
+                        'Webhook endpoint %s was not saved: endpoints must use HTTPS. (Development setups can allow HTTP via the spa_allow_insecure_webhooks filter.)',
+                        '<code>' . esc_html($rawUrl) . '</code>'
+                    )
+                );
+                continue;
+            }
+
+            $url = esc_url_raw($rawUrl, $schemes);
             if ($url === '' || !wp_http_validate_url($url) || isset($seen[$url])) {
                 continue;
             }
 
             $seen[$url] = true;
             $webhooks[] = [
-                'url'   => $url,
-                'label' => mb_substr(sanitize_text_field((string) (is_array($entry) ? ($entry['label'] ?? '') : '')), 0, 100),
+                'url'    => $url,
+                'label'  => mb_substr(sanitize_text_field((string) (is_array($entry) ? ($entry['label'] ?? '') : '')), 0, 100),
+                'secret' => mb_substr(sanitize_text_field((string) (is_array($entry) ? ($entry['secret'] ?? '') : '')), 0, 190),
             ];
         }
         $out['webhooks'] = $webhooks;
@@ -192,6 +223,38 @@ final class SettingsPage
     }
 
     /**
+     * Handles the "Discard" action on a pending webhook retry.
+     *
+     * Same nonce + capability pattern as the test send. The dispatcher does
+     * the actual work under the dispatch mutex; when the mutex is busy (a
+     * dispatch run is mid-flight) the admin is told to try again instead of
+     * racing the run's bookkeeping.
+     *
+     * @return void
+     */
+    public static function handleDiscardRetry(): void
+    {
+        if (
+            empty($_GET['action']) ||
+            $_GET['action'] !== self::DISCARD_ACTION ||
+            empty($_GET['spa_retry']) ||
+            empty($_GET['spa_nonce']) ||
+            !wp_verify_nonce(sanitize_text_field(wp_unslash($_GET['spa_nonce'])), self::DISCARD_ACTION) ||
+            !current_user_can('manage_options')
+        ) {
+            return;
+        }
+
+        $key  = sanitize_key(wp_unslash($_GET['spa_retry']));
+        $done = WebhookDispatcher::discardRetry($key);
+
+        wp_safe_redirect(self_admin_url(
+            'admin.php?page=' . self::MENU_SLUG . '&spa_retry_discarded=' . ($done ? '1' : 'busy')
+        ));
+        exit;
+    }
+
+    /**
      * Shows a notice after a manual test send completes.
      *
      * @return void
@@ -215,6 +278,29 @@ final class SettingsPage
     }
 
     /**
+     * Shows the outcome of a "Discard" action on a pending webhook retry.
+     *
+     * @return void
+     */
+    public static function maybeShowDiscardNotice(): void
+    {
+        if (empty($_GET['spa_retry_discarded'])) {
+            return;
+        }
+
+        if ($_GET['spa_retry_discarded'] === 'busy') {
+            echo '<div class="notice notice-warning is-dismissible"><p>'
+                . 'SitePulse Analytics: A webhook dispatch run is in progress; the retry was not discarded. Try again in a moment.'
+                . '</p></div>';
+            return;
+        }
+
+        echo '<div class="notice notice-success is-dismissible"><p>'
+            . 'SitePulse Analytics: The pending retry was discarded. The endpoint\'s next scheduled delivery will cover that window\'s data again under a new delivery id.'
+            . '</p></div>';
+    }
+
+    /**
      * Renders the settings page.
      *
      * @return void
@@ -229,6 +315,14 @@ final class SettingsPage
 
         echo '<div class="wrap spa-wrap">';
         echo '<h1>SitePulse Analytics Settings</h1>';
+
+        // WordPress only auto-renders settings errors on options-general.php
+        // pages; a custom-menu settings page must print them itself, or the
+        // sanitize callback's warnings (e.g. a rejected http:// endpoint)
+        // silently disappear. No argument: this also surfaces core's own
+        // "Settings saved." confirmation, which is registered under the
+        // 'general' setting.
+        settings_errors();
 
         echo '<form method="post" action="options.php">';
         settings_fields(self::OPTION_GROUP);
@@ -267,6 +361,7 @@ final class SettingsPage
 
         foreach ($pending as $retry) {
             $when = (int) ($retry['scheduled_for'] ?? 0);
+            $url  = (string) ($retry['url'] ?? '');
 
             if (!empty($retry['exhausted'])) {
                 $due = 'with the next scheduled send (retry chain exhausted; the frozen payload is kept and re-sent first)';
@@ -276,16 +371,31 @@ final class SettingsPage
                 $due = 'as soon as WP-Cron next runs';
             }
 
+            $discardUrl = wp_nonce_url(
+                add_query_arg(
+                    ['page' => self::MENU_SLUG, 'action' => self::DISCARD_ACTION, 'spa_retry' => md5($url)],
+                    self_admin_url('admin.php')
+                ),
+                self::DISCARD_ACTION,
+                'spa_nonce'
+            );
+
             printf(
-                '<li>Retry %d of %d to <code>%s</code> — next attempt %s.</li>',
+                '<li>Retry %d of %d to <code>%s</code> — next attempt %s. <a href="%s">Discard this retry</a></li>',
                 (int) ($retry['attempt'] ?? 1),
                 (int) $max,
-                esc_html((string) ($retry['url'] ?? '')),
-                esc_html($due)
+                esc_html($url),
+                esc_html($due),
+                esc_url($discardUrl)
             );
         }
 
-        echo '</ul></div>';
+        echo '</ul>';
+        echo '<p class="description">Discarding a retry drops its frozen payload; the data itself is not lost — the '
+            . 'endpoint\'s next scheduled delivery covers that window again under a new delivery id (a receiver that '
+            . 'already processed the frozen delivery would then see that data twice). Frozen retries older than the '
+            . 'retention window are discarded automatically.</p>';
+        echo '</div>';
     }
 
     /**
@@ -374,7 +484,7 @@ final class SettingsPage
     {
         $webhooks = Options::webhooks();
         if ($webhooks === []) {
-            $webhooks = [['url' => '', 'label' => '']];
+            $webhooks = [['url' => '', 'label' => '', 'secret' => '']];
         }
         $hasAnyUrl = (bool) array_filter(array_column($webhooks, 'url'));
 
@@ -396,13 +506,14 @@ final class SettingsPage
         echo '<div class="spa-card">';
         echo '<h2 class="spa-card-title">Webhook Settings</h2>';
         echo '<p class="description" style="margin-bottom:14px;">Aggregated analytics are sent to every endpoint listed below on the schedule you choose. '
+            . 'Endpoints must use HTTPS (development setups can allow HTTP via the <code>spa_allow_insecure_webhooks</code> filter). '
             . 'Add a label so each webhook is easy to identify in the Delivery Log. '
             . 'Each endpoint receives the data collected since its own last successful delivery, and failed deliveries are retried '
             . 'automatically up to 5 more times over about 24 hours — no data is lost either way.</p>';
 
         echo '<div id="spa-webhooks-container">';
         foreach ($webhooks as $idx => $webhook) {
-            self::renderWebhookBlock($idx, (string) $webhook['url'], (string) $webhook['label']);
+            self::renderWebhookBlock($idx, (string) $webhook['url'], (string) $webhook['label'], (string) ($webhook['secret'] ?? ''));
         }
         echo '</div>';
 
@@ -440,7 +551,8 @@ final class SettingsPage
         echo '<p class="description">When set, every webhook request includes an <code>X-SPA-Signature</code> header — '
             . '<code>sha256=&lt;hex&gt;</code>, the HMAC-SHA256 of the raw JSON body keyed with this secret — so the '
             . 'receiver can verify payloads genuinely came from this site. Share the secret with the endpoint operator '
-            . 'over a secure channel.</p>';
+            . 'over a secure channel. An endpoint block\'s own signing secret (above) overrides this shared one for '
+            . 'that endpoint, so one receiver never learns the key that signs payloads for the others.</p>';
         echo '</td></tr>';
 
         echo '<tr><th scope="row">History backfill</th><td>';
@@ -485,17 +597,19 @@ final class SettingsPage
     }
 
     /**
-     * Renders one webhook block of the repeater: a URL field and an optional
-     * label field, with a Remove button on every block but the first (which
-     * is the form's permanent field — clearing it, alongside the Webhook
-     * Status toggle, is how webhook sending is disabled).
+     * Renders one webhook block of the repeater: a URL field, an optional
+     * label field, and an optional per-endpoint signing secret, with a
+     * Remove button on every block but the first (which is the form's
+     * permanent field — clearing it, alongside the Webhook Status toggle,
+     * is how webhook sending is disabled).
      *
-     * @param int    $index Zero-based position in the repeater.
-     * @param string $url   Saved endpoint URL, or '' for an empty block.
-     * @param string $label Saved label, or '' when none was set.
+     * @param int    $index  Zero-based position in the repeater.
+     * @param string $url    Saved endpoint URL, or '' for an empty block.
+     * @param string $label  Saved label, or '' when none was set.
+     * @param string $secret Saved per-endpoint secret, or '' when none was set.
      * @return void
      */
-    private static function renderWebhookBlock(int $index, string $url, string $label): void
+    private static function renderWebhookBlock(int $index, string $url, string $label, string $secret = ''): void
     {
         echo '<div class="spa-webhook-block" data-webhook-index="' . esc_attr((string) $index) . '">';
 
@@ -519,6 +633,13 @@ final class SettingsPage
             . 'name="' . esc_attr(Options::OPTION_KEY . '[webhooks][' . $index . '][label]') . '" '
             . 'value="' . esc_attr($label) . '" placeholder="Label (optional — shown in the Delivery Log)" '
             . 'aria-label="Webhook ' . esc_attr((string) ($index + 1)) . ' label">';
+        echo '</div>';
+
+        echo '<div style="margin-top:8px;">';
+        echo '<input type="text" class="regular-text code spa-webhook-secret-input" autocomplete="off" '
+            . 'name="' . esc_attr(Options::OPTION_KEY . '[webhooks][' . $index . '][secret]') . '" '
+            . 'value="' . esc_attr($secret) . '" placeholder="Signing secret (optional — overrides the shared secret)" '
+            . 'aria-label="Webhook ' . esc_attr((string) ($index + 1)) . ' signing secret">';
         echo '</div>';
 
         echo '</div>';

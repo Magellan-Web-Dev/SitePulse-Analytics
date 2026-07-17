@@ -123,6 +123,12 @@ final class DashboardPage
         $totals = Reports::totalsByType($start, $end);
         $daily  = Reports::dailyCounts($start, $end, 'pageview');
 
+        // The Confirmed Conversions card must agree with the Campaigns and
+        // Channels reports, which deduplicate by conversion id — the raw
+        // per-type row count can include at-least-once redeliveries stored
+        // before batch-id dedup existed.
+        $totals['form_success'] = Reports::conversionCount($start, $end);
+
         echo '<div class="wrap spa-wrap spa-dash">';
         echo '<h1>SitePulse Analytics</h1>';
 

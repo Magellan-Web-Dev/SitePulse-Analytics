@@ -30,7 +30,7 @@ final class DatabaseManager
     private const DB_VERSION_OPTION = 'spa_db_version';
 
     /** @var string Current schema version; bump when the CREATE TABLE below changes. */
-    private const DB_VERSION = '1.3.0';
+    private const DB_VERSION = '1.4.0';
 
     /**
      * Returns the fully-prefixed events table name.
@@ -81,8 +81,11 @@ final class DatabaseManager
             utm_content VARCHAR(191) NOT NULL DEFAULT '',
             click_id_type VARCHAR(20) NOT NULL DEFAULT '',
             channel VARCHAR(24) NOT NULL DEFAULT '',
+            batch_id VARCHAR(40) DEFAULT NULL,
+            batch_seq SMALLINT UNSIGNED NOT NULL DEFAULT 0,
             created_at DATETIME NOT NULL,
             PRIMARY KEY  (id),
+            UNIQUE KEY batch_event (batch_id,batch_seq),
             KEY type_date (event_type,created_at),
             KEY type_session_date (event_type,session_id,created_at),
             KEY created_at (created_at),
@@ -91,7 +94,62 @@ final class DatabaseManager
 
         dbDelta($sql);
 
-        update_option(self::DB_VERSION_OPTION, self::DB_VERSION);
+        // Only record the schema version once the table verifiably carries
+        // every expected column AND the batch_event unique index — a failed
+        // or partial dbDelta run (out of disk, lost connection, a killed
+        // index build on a large table) must be retried on the next load
+        // instead of being silently marked complete. The index is checked
+        // explicitly because batch-replay dedup lives in the index, not the
+        // columns — and on a big upgrade the instant ADD COLUMNs can succeed
+        // while the full ADD UNIQUE KEY build is exactly what gets killed.
+        if (
+            self::tableHasColumns($table, array_merge(['id'], self::COLUMNS, ['batch_id', 'batch_seq']))
+            && self::tableHasIndex($table, 'batch_event')
+        ) {
+            update_option(self::DB_VERSION_OPTION, self::DB_VERSION);
+        }
+    }
+
+    /**
+     * Whether a table has an index with the given name.
+     *
+     * @param string $table Fully-prefixed table name.
+     * @param string $index Index (Key_name) to look for.
+     * @return bool
+     */
+    public static function tableHasIndex(string $table, string $index): bool
+    {
+        global $wpdb;
+
+        $rows = $wpdb->get_col($wpdb->prepare(
+            'SHOW INDEX FROM %i WHERE Key_name = %s',
+            $table,
+            $index
+        ));
+
+        return is_array($rows) && $rows !== [];
+    }
+
+    /**
+     * Whether a table exists and contains every listed column.
+     *
+     * Used to verify a dbDelta migration actually landed before its schema
+     * version is recorded (also by {@see \SitePulseAnalytics\Webhook\DeliveryLog}).
+     *
+     * @param string   $table   Fully-prefixed table name.
+     * @param string[] $columns Column names that must all exist.
+     * @return bool
+     */
+    public static function tableHasColumns(string $table, array $columns): bool
+    {
+        global $wpdb;
+
+        $existing = $wpdb->get_col($wpdb->prepare('SHOW COLUMNS FROM %i', $table));
+        if (!is_array($existing) || $existing === []) {
+            return false;
+        }
+
+        return array_diff($columns, $existing) === [];
     }
 
     /**
@@ -149,18 +207,39 @@ final class DatabaseManager
      * one statement instead of one query per event keeps ingestion cheap on
      * busy sites.
      *
-     * @param array<int, array{type: string, data: array<string, mixed>}> $events Events to insert.
-     * @return int Number of rows inserted.
+     * When $batchId is given (the tracker's client-generated batch id), every
+     * row is written with (batch_id, batch_seq) — the event's ordinal within
+     * its original batch — under the table's UNIQUE batch_event index, and
+     * the statement runs as INSERT IGNORE. Delivery from the browser is
+     * at-least-once (a batch whose response is lost is replayed), so a
+     * replayed batch's rows collide with the originals and are silently
+     * skipped instead of double-counting every metric. Server-side events
+     * (spa_track_event()) carry no batch id: batch_id stays NULL, which the
+     * unique index never collides on, and a plain INSERT is used so genuine
+     * errors are not downgraded to warnings.
+     *
+     * @param array<int, array{type: string, data: array<string, mixed>, seq?: int}> $events  Events to insert; 'seq' is
+     *                                                                                        the event's index in the
+     *                                                                                        original client batch.
+     * @param string|null                                                            $batchId Client batch id, or null.
+     * @return int|false Number of NEW rows inserted (replayed duplicates are
+     *                   not counted), or false when the INSERT itself failed —
+     *                   callers must not acknowledge the batch in that case.
      */
-    public static function insertEvents(array $events): int
+    public static function insertEvents(array $events, ?string $batchId = null): int|false
     {
         global $wpdb;
 
         $rows = [];
-        foreach ($events as $event) {
+        foreach ($events as $index => $event) {
             $row = self::sanitizeRow((string) ($event['type'] ?? ''), (array) ($event['data'] ?? []));
             if ($row !== null) {
-                $rows[] = $row;
+                // The ordinal comes from the event's position in the ORIGINAL
+                // request, not the surviving-row index — a settings change
+                // between attempts may drop different events, and shifted
+                // ordinals would let a replayed event dodge the unique index.
+                $row['batch_seq'] = (int) ($event['seq'] ?? $index);
+                $rows[]           = $row;
             }
         }
 
@@ -168,23 +247,42 @@ final class DatabaseManager
             return 0;
         }
 
-        $columns      = '`' . implode('`, `', self::COLUMNS) . '`';
-        $placeholders = '(' . implode(', ', array_fill(0, count(self::COLUMNS), '%s')) . ')';
+        $columns      = self::COLUMNS;
+        $placeholder  = array_fill(0, count(self::COLUMNS), '%s');
+        if ($batchId !== null) {
+            $columns[]     = 'batch_id';
+            $columns[]     = 'batch_seq';
+            $placeholder[] = '%s';
+            $placeholder[] = '%d';
+        }
+
+        $columnSql    = '`' . implode('`, `', $columns) . '`';
+        $placeholders = '(' . implode(', ', $placeholder) . ')';
         $values       = [];
 
         foreach ($rows as $row) {
             foreach (self::COLUMNS as $column) {
                 $values[] = $row[$column];
             }
+            if ($batchId !== null) {
+                $values[] = $batchId;
+                $values[] = $row['batch_seq'];
+            }
         }
 
+        $verb = $batchId !== null ? 'INSERT IGNORE INTO ' : 'INSERT INTO ';
+
         $inserted = $wpdb->query($wpdb->prepare(
-            'INSERT INTO ' . self::tableName() . " ({$columns}) VALUES "
+            $verb . self::tableName() . " ({$columnSql}) VALUES "
                 . implode(', ', array_fill(0, count($rows), $placeholders)),
             $values
         ));
 
-        return is_int($inserted) ? $inserted : 0;
+        // A false return means the statement itself failed (e.g. the database
+        // went away) — distinct from 0, which just means every row was a
+        // replayed duplicate. Callers use the difference to decide between
+        // acknowledging the batch and telling the client to retry it.
+        return $inserted === false ? false : (int) $inserted;
     }
 
     /**

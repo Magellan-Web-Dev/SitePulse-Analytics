@@ -25,6 +25,10 @@ use SitePulseAnalytics\Webhook\DeliveryLog;
  * The endpoint is off by default; it is enabled (and its key managed) on the
  * SitePulse → Delivery Log admin page.
  *
+ * Responses identify each delivery's endpoint by its label and a REDACTED
+ * URL (scheme://host only) — full webhook URLs can embed bearer tokens and
+ * never leave the site through this read-only API (see formatEntry()).
+ *
  * Cross-origin requests are permitted from any origin. The following CORS
  * headers are added to every response (including OPTIONS preflight):
  *   Access-Control-Allow-Origin:   *
@@ -335,6 +339,14 @@ final class DeliveryLogApi
      * Shapes one database row into the public API representation, decoding
      * the stored JSON bodies where possible.
      *
+     * endpoint_url is REDACTED to scheme://host(:port). Webhook URLs
+     * routinely carry bearer tokens in their path or query string
+     * (hooks.example.com/ingest/<token>), and this API authenticates with a
+     * read-only key — a leak of that key must not also hand out write
+     * credentials for every downstream endpoint. The label identifies the
+     * endpoint for legitimate consumers; the full URL stays visible to
+     * admins on the Delivery Log page.
+     *
      * @param array<string, mixed> $entry A single DeliveryLog row.
      * @return array<string, mixed>
      */
@@ -348,7 +360,7 @@ final class DeliveryLogApi
             'id'            => (int) ($entry['id'] ?? 0),
             'created_at'    => (string) ($entry['created_at'] ?? ''),
             'success'       => (int) ($entry['success'] ?? 0) === 1,
-            'endpoint_url'  => $endpoint,
+            'endpoint_url'  => self::redactEndpointUrl($endpoint),
             'webhook_label' => $endpoint !== '' ? Options::webhookLabel($endpoint) : '',
             'delivery_id'   => (string) ($entry['delivery_id'] ?? ''),
             'kind'          => (string) ($entry['kind'] ?? ''),
@@ -357,5 +369,28 @@ final class DeliveryLogApi
             'request_data'  => is_array($requestDecoded) ? $requestDecoded : [],
             'response_data' => is_array($responseDecoded) ? $responseDecoded : (string) ($entry['response_data'] ?? ''),
         ];
+    }
+
+    /**
+     * Reduces a stored endpoint URL to scheme://host(:port) — everything
+     * that can carry a credential (path, query, fragment, userinfo) is
+     * dropped before the URL leaves the site through this API.
+     *
+     * @param string $url Full stored endpoint URL.
+     * @return string Redacted URL, or '' when the URL cannot be parsed.
+     */
+    private static function redactEndpointUrl(string $url): string
+    {
+        if ($url === '') {
+            return '';
+        }
+
+        $parts = wp_parse_url($url);
+        if (!is_array($parts) || empty($parts['host'])) {
+            return '';
+        }
+
+        return strtolower((string) ($parts['scheme'] ?? 'https')) . '://' . $parts['host']
+            . (isset($parts['port']) ? ':' . (int) $parts['port'] : '');
     }
 }

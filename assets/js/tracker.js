@@ -5,17 +5,23 @@
  * window.SitePulseConfig (printed by ScriptLoader immediately before this
  * script), batches events in memory, and delivers them to the plugin's REST
  * endpoint via fetch (or navigator.sendBeacon on page exit). Every batch is
- * PERSISTED to a bounded sessionStorage map (keyed by batch id) before it is
- * sent, and removed only when the server acknowledges it (2xx, or a 4xx that
- * retrying cannot fix) — so a page destroyed before the response arrives
- * leaves the batch behind for the next page in this tab to resend. One
- * batch's success can never discard another's undelivered events.
- * Fetch-delivered batches are therefore at-least-once (a rare duplicate is
- * possible if a response was lost). Page-exit batches handed to
+ * PERSISTED to a bounded sessionStorage map (keyed by batch id; an in-memory
+ * map stands in when sessionStorage is unavailable) before it is sent, and
+ * removed only when the server acknowledges it (2xx, or a 4xx — other than
+ * 429 — that retrying cannot fix) — so a page destroyed before the response
+ * arrives leaves the batch behind for the next page in this tab to resend.
+ * One batch's success can never discard another's undelivered events.
+ * Fetch-delivered batches are therefore at-least-once; the batch id is sent
+ * in the request body, and the server stores rows under a unique
+ * (batch id, ordinal) key, so a replayed batch whose response was lost is
+ * deduplicated instead of double-counting. FRESH page-exit batches handed to
  * navigator.sendBeacon are the exception: an accepted hand-off only means
  * the browser queued the request, so those are treated as delivered
- * (best-effort) — keeping them persisted would resend every exit batch on
- * the next page and systematically double-count instead.
+ * (best-effort) — keeping every one persisted would resend every exit batch
+ * on the next page. But a batch that already survived a failed or
+ * unacknowledged send stays persisted even through an accepted hand-off:
+ * its loss is exactly what retrying exists to prevent, and the server-side
+ * batch-id dedup absorbs the resend if the beacon did land.
  *
  * Tracked interactions (each individually toggleable in plugin settings):
  *  - pageview     : one event per page load
@@ -429,12 +435,32 @@
      * shared stash cleared on any success would let batch B's success
      * discard batch A's still-undelivered events when two sends overlap.
      * Total stashed events are bounded by MAX_QUEUE (oldest batches dropped
-     * first). */
+     * first). When sessionStorage is unavailable (blocked, private mode
+     * quirks), an in-memory map takes over: retries then only last this
+     * page's lifetime, but failed batches are still resent by later flushes
+     * instead of being lost the moment the send fails. */
+
+    /** sessionStorage when usable, else null (in-memory pending map instead). */
+    var pendingStore = (function () {
+        try {
+            window.sessionStorage.setItem('spa_probe', '1');
+            window.sessionStorage.removeItem('spa_probe');
+            return window.sessionStorage;
+        } catch (e) {
+            return null;
+        }
+    })();
+
+    /** In-memory pending-batch map, used when sessionStorage is unusable. */
+    var memoryPending = {};
 
     /** @returns {Object<string, Array>} The pending-batch map ({} when unreadable). */
     function readPendingMap() {
+        if (!pendingStore) {
+            return memoryPending;
+        }
         try {
-            var map = JSON.parse(sessionStorage.getItem(PENDING_KEY));
+            var map = JSON.parse(pendingStore.getItem(PENDING_KEY));
             return (map && typeof map === 'object' && !Array.isArray(map)) ? map : {};
         } catch (e) {
             return {};
@@ -442,14 +468,23 @@
     }
 
     function writePendingMap(map) {
+        if (!pendingStore) {
+            memoryPending = map;
+            return;
+        }
         try {
             if (Object.keys(map).length === 0) {
-                sessionStorage.removeItem(PENDING_KEY);
+                pendingStore.removeItem(PENDING_KEY);
             } else {
-                sessionStorage.setItem(PENDING_KEY, JSON.stringify(map));
+                pendingStore.setItem(PENDING_KEY, JSON.stringify(map));
             }
         } catch (e) {
-            // sessionStorage blocked or full — retries last this page only.
+            // sessionStorage filled up or got blocked mid-page — fall back to
+            // memory from here on so pending batches keep being tracked. The
+            // server's batch-id dedup absorbs any overlap with entries that
+            // did make it into sessionStorage earlier.
+            memoryPending = map;
+            pendingStore  = null;
         }
     }
 
@@ -485,22 +520,41 @@
     /** Batch ids in flight right now, so a slow retry isn't sent twice. */
     var inFlight = {};
 
+    /** Batch ids known to have survived a failed or unacknowledged send —
+     *  either they failed retryably on THIS page (network error, 5xx, 429,
+     *  503) or they were inherited from the pending map (their sender never
+     *  saw a response). These stay persisted even through an accepted
+     *  page-exit beacon hand-off: the beacon's response is never observable,
+     *  and for a batch that already failed once "accepted" must not mean
+     *  "delivered" — the server's batch-id dedup absorbs the resend if the
+     *  beacon did land. Fresh exit batches keep best-effort hand-off
+     *  semantics so ordinary navigation doesn't replay every batch. */
+    var retryPending = {};
+
     /**
      * Sends one batch under its id, persisting it BEFORE the attempt so a
      * page destroyed mid-flight can never lose it. The persisted entry is
      * removed only on acknowledgment: a 2xx response, or a 4xx that retrying
-     * cannot fix. A network error or 5xx leaves it persisted for a later
-     * flush (this page or the next one in this tab) to resend.
+     * cannot fix (429 is rate limiting, not rejection — the batch stays
+     * persisted and a later flush retries it). A network error, 5xx, or 429
+     * leaves it persisted for a later flush (this page or the next one in
+     * this tab) to resend.
+     *
+     * The batch id travels in the request body: the server keys stored rows
+     * by (batch id, event ordinal), so a replay of an already-stored batch —
+     * delivered, but its response lost — is deduplicated server-side rather
+     * than inflating every count.
      *
      * On page exit sendBeacon is preferred because it survives unload;
-     * otherwise a keepalive fetch runs. An accepted beacon hand-off is
-     * treated as delivered even though the browser has only queued it —
-     * beacon delivery is best-effort by nature, and keeping the entry
-     * persisted would resend every exit batch on the next page and
-     * systematically double-count.
+     * otherwise a keepalive fetch runs. For a FRESH batch an accepted beacon
+     * hand-off is treated as delivered even though the browser has only
+     * queued it — beacon delivery is best-effort by nature, and keeping
+     * every exit batch persisted would resend all of them on the next page.
+     * A batch already marked retry-pending is the exception: it stays
+     * persisted through the hand-off (see retryPending above).
      */
     function sendBatch(id, events, exiting) {
-        var body = JSON.stringify({ events: events });
+        var body = JSON.stringify({ batch_id: id, events: events });
 
         inFlight[id] = true;
         stashBatch(id, events);
@@ -516,7 +570,15 @@
                 accepted = false;
             }
             if (accepted) {
-                unstashBatch(id);
+                // A batch that already failed once must not be forgotten on
+                // a mere hand-off — the beacon's outcome is unobservable, and
+                // losing it here is exactly the loss the retry path exists to
+                // prevent. It stays persisted; a later flush resends it and
+                // the server's batch-id dedup absorbs the overlap if this
+                // beacon did land.
+                if (!retryPending[id]) {
+                    unstashBatch(id);
+                }
                 delete inFlight[id];
                 return;
             }
@@ -531,14 +593,19 @@
                 credentials: 'omit',
                 keepalive: true
             }).then(function (response) {
-                if (response.ok || (response.status >= 400 && response.status < 500)) {
+                if (response.ok || (response.status >= 400 && response.status < 500 && response.status !== 429)) {
                     unstashBatch(id); // Acknowledged, or unfixable by retry.
+                    delete retryPending[id];
+                } else {
+                    retryPending[id] = true; // 5xx/429 — retryable failure.
                 }
                 delete inFlight[id];
             }).catch(function () {
+                retryPending[id] = true;
                 delete inFlight[id]; // Network error — stays persisted.
             });
         } catch (e) {
+            retryPending[id] = true;
             delete inFlight[id]; // fetch unavailable/threw — stays persisted.
         }
     }
@@ -552,6 +619,10 @@
         var map = readPendingMap();
         for (var id in map) {
             if (Object.prototype.hasOwnProperty.call(map, id) && !inFlight[id]) {
+                // Anything still in the pending map at resend time was never
+                // acknowledged — mark it so an exit-time beacon hand-off
+                // can't be its last trace (see sendBatch()).
+                retryPending[id] = true;
                 sendBatch(id, map[id], exiting);
             }
         }
@@ -717,9 +788,12 @@
                 hoverTracked.add(el);
             }
 
+            // An image src can carry query-string tokens (signed CDN URLs,
+            // cache busters) — strip query and fragment before using it as
+            // the fallback label, like every other stored URL.
             track('hover', {
                 element_tag: el.tagName.toLowerCase(),
-                element_label: labelFor(el) || cleanLabel(el.src || ''),
+                element_label: labelFor(el) || cleanLabel(String(el.src || '').split('#')[0].split('?')[0]),
                 target_url: cleanTarget(el.href),
                 event_value: String(HOVER_DWELL)
             });

@@ -196,14 +196,15 @@ final class Options
     }
 
     /**
-     * Returns the configured webhooks, each with its URL and optional label.
+     * Returns the configured webhooks, each with its URL, optional label,
+     * and optional per-endpoint signing secret.
      *
      * Pre-1.1.0 installs stored a flat list of URLs under 'webhook_urls'
      * (no labels); when no 'webhooks' entries are saved yet, those legacy
      * URLs are synthesized into unlabeled entries so upgrading never loses
      * a configured endpoint.
      *
-     * @return array<int, array{url: string, label: string}>
+     * @return array<int, array{url: string, label: string, secret: string}>
      */
     public static function webhooks(): array
     {
@@ -223,8 +224,9 @@ final class Options
             }
 
             $out[] = [
-                'url'   => $url,
-                'label' => is_array($entry) ? trim((string) ($entry['label'] ?? '')) : '',
+                'url'    => $url,
+                'label'  => is_array($entry) ? trim((string) ($entry['label'] ?? '')) : '',
+                'secret' => is_array($entry) ? trim((string) ($entry['secret'] ?? '')) : '',
             ];
         }
 
@@ -288,6 +290,26 @@ final class Options
     public static function webhookSecret(): string
     {
         return (string) self::all()['webhook_secret'];
+    }
+
+    /**
+     * The signing secret effective for one endpoint: the per-endpoint secret
+     * saved on its webhook block when set, otherwise the shared secret.
+     * Per-endpoint secrets mean one compromised receiver never learns the
+     * key that authenticates payloads to every other receiver.
+     *
+     * @param string $url Endpoint URL (exact match against saved webhooks).
+     * @return string Secret to sign with, or '' when signing is not configured.
+     */
+    public static function webhookSecretFor(string $url): string
+    {
+        foreach (self::webhooks() as $webhook) {
+            if ($webhook['url'] === $url && $webhook['secret'] !== '') {
+                return $webhook['secret'];
+            }
+        }
+
+        return self::webhookSecret();
     }
 
     /**

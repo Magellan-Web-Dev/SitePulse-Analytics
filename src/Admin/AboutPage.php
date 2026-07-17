@@ -239,10 +239,15 @@ final class AboutPage
 
         echo '<p>Batches flush every few seconds and on page exit via <code>navigator.sendBeacon</code>, '
             . 'so events are not lost when a visitor navigates away. Every batch is persisted to a bounded '
-            . '<code>sessionStorage</code> map <em>before</em> it is sent and removed only when the server '
-            . 'acknowledges it, so batches survive the page being destroyed mid-flight and are resent by later '
-            . 'flushes — even by the next page in that tab. Fetch-delivered batches are at-least-once; page-exit '
-            . 'beacon hand-offs are best-effort (an accepted hand-off counts as delivered). Every event carries the '
+            . '<code>sessionStorage</code> map <em>before</em> it is sent (an in-memory map stands in when '
+            . '<code>sessionStorage</code> is unavailable) and removed only when the server acknowledges it, so '
+            . 'batches survive the page being destroyed mid-flight and are resent by later flushes — even by the '
+            . 'next page in that tab. Rate-limited (429) and failed-storage (503) responses keep the batch persisted '
+            . 'for retry. Fetch-delivered batches are at-least-once, and each batch carries its <code>batch_id</code> '
+            . 'in the body: the server stores rows under a unique (batch id, event ordinal) key, so a replayed batch '
+            . 'whose response was lost is deduplicated instead of inflating the reports. Fresh page-exit '
+            . 'beacon hand-offs are best-effort (an accepted hand-off counts as delivered), but a batch that already '
+            . 'failed once stays persisted even through a beacon hand-off — the dedup absorbs the resend. Every event carries the '
             . 'session\'s attribution snapshot — the utm fields, click-identifier type, and <code>session_referrer</code> '
             . '(the referrer the session entered through, used to classify the marketing channel; not stored as its own '
             . 'field) — so clicks, form attempts, and scroll milestones can be segmented by campaign, not just pageviews '
@@ -250,6 +255,7 @@ final class AboutPage
 
         echo '<pre class="spa-about-code">' . esc_html(
             (string) wp_json_encode([
+                'batch_id' => 'b3f2a9c1b8e0d',
                 'events' => [
                     [
                         'type'             => 'pageview',
@@ -371,7 +377,8 @@ final class AboutPage
             . 'a window holding more than 100 conversions is split into consecutive, non-overlapping deliveries (worked '
             . 'off within the same run) rather than dropping the overflow.</p>';
 
-        echo '<p>Deliveries run under a site-wide dispatch lock, so overlapping cron executions can never send '
+        echo '<p>Deliveries run under a site-wide dispatch lock — every mutation of the retry bookkeeping happens '
+            . 'while holding it — so overlapping cron executions can never send '
             . 'overlapping reporting windows, and endpoints sharing the same window share one computed summary '
             . 'per run. Failed deliveries are retried automatically up to 5 more times over about 24 hours '
             . '(after 5 minutes, 30 minutes, 2 hours, 6 hours, and 16 hours). The exact JSON body that failed is frozen '
@@ -379,14 +386,16 @@ final class AboutPage
             . 'the same <code>delivery_id</code> (also sent as an <code>Idempotency-Key</code> header), so deduplicating '
             . 'by that id is sufficient for a receiver to never double-count. Deactivating the plugin suspends pending '
             . 'retries rather than discarding them: their frozen deliveries resume with the first scheduled dispatch '
-            . 'after reactivation, still under their original ids.</p>';
+            . 'after reactivation, still under their original ids. Frozen deliveries older than the data retention '
+            . 'window are discarded automatically, and each pending retry has an explicit Discard action on the '
+            . 'Settings page.</p>';
 
         echo '<p>Every <code>POST</code> uses <code>Content-Type: application/json</code>. The body shape is:</p>';
 
         echo '<pre class="spa-about-code">' . esc_html(
             (string) wp_json_encode([
                 'source'         => 'sitepulse-analytics',
-                'plugin_version' => defined('SPA_VERSION') ? SPA_VERSION : '1.6.0',
+                'plugin_version' => defined('SPA_VERSION') ? SPA_VERSION : '1.7.0',
                 'website_info'   => [
                     'name'   => get_bloginfo('name'),
                     'url'    => home_url(),
@@ -447,12 +456,16 @@ final class AboutPage
             . 'each is always present in the payload as an empty string when not set, so consumers never have to check '
             . 'for its existence.</p>';
 
-        echo '<p>Requests are sent with <code>wp_safe_remote_post()</code> (endpoints are re-validated at request time) and '
+        echo '<p>Endpoint URLs must use <strong>HTTPS</strong> (development setups can allow HTTP via the '
+            . '<code>spa_allow_insecure_webhooks</code> filter). Requests are sent with <code>wp_safe_remote_post()</code> '
+            . '(endpoints are re-validated at request time) and '
             . 'redirects disabled, and every request carries an <code>Idempotency-Key</code> header equal to the '
             . 'payload\'s <code>delivery_id</code>. When a <strong>Signing secret</strong> is configured in Settings, '
             . 'every request also carries an <code>X-SPA-Signature</code> header — <code>sha256=&lt;hex&gt;</code>, the '
             . 'HMAC-SHA256 of the raw JSON body keyed with the secret — so the receiver can verify each payload came '
-            . 'from this installation and was not altered in transit. A <strong>"Send test payload now"</strong> button on the Settings '
+            . 'from this installation and was not altered in transit. Each endpoint block can also set its own signing '
+            . 'secret, which overrides the shared one for that endpoint — so one receiver never learns the key that '
+            . 'signs payloads for the others. A <strong>"Send test payload now"</strong> button on the Settings '
             . 'page delivers the last 7 days to every endpoint immediately (flagged with <code>"test": true</code>).</p>';
 
         echo '<p><em>' . esc_html($count === 0
@@ -491,7 +504,10 @@ final class AboutPage
 
         echo '<h3 class="spa-about-subheading">Deliveries REST API</h3>';
         echo '<p>The Delivery Log page can enable a read-only REST endpoint that returns the same data. It is intended for '
-            . '<strong>server-to-server</strong> use — never embed the API key in public frontend JavaScript, where any visitor could read it.</p>';
+            . '<strong>server-to-server</strong> use — never embed the API key in public frontend JavaScript, where any visitor could read it. '
+            . 'In API responses the <code>endpoint_url</code> is redacted to its scheme and host — webhook URLs can embed '
+            . 'bearer tokens in their path or query string, and the read-only key must never hand those out; use '
+            . '<code>webhook_label</code> to identify endpoints (the full URL remains visible on the admin page).</p>';
         echo '<p><strong>Route:</strong> <code>GET /wp-json/sitepulse/v1/deliveries</code></p>';
         echo '<p>Enable the API from the <strong>Deliveries API</strong> card on the Delivery Log page. Only a hash of the key is '
             . 'stored, so the raw key is shown <strong>once</strong> — right after it is generated; copy it then, or regenerate a new one. '
@@ -513,7 +529,7 @@ final class AboutPage
                         'id'            => 512,
                         'created_at'    => '2026-07-10 12:00:03',
                         'success'       => false,
-                        'endpoint_url'  => 'https://crm.example.com/hooks/sitepulse',
+                        'endpoint_url'  => 'https://crm.example.com',
                         'webhook_label' => 'CRM',
                         'delivery_id'   => '0f52c1d6a4b98e73d21f06c58a9b3e47',
                         'kind'          => 'retry',
@@ -585,6 +601,9 @@ final class AboutPage
         echo '<tr><td><code>spa_delivery_log_row</code></td>'
             . '<td>Inspect or modify a delivery-log row before it is stored (e.g. site-specific redaction); '
             . 'return <code>false</code> to skip logging that attempt.</td></tr>';
+        echo '<tr><td><code>spa_allow_insecure_webhooks</code></td>'
+            . '<td>Return <code>true</code> to allow plain-HTTP webhook endpoint URLs to be saved (development '
+            . 'setups only; endpoints require HTTPS by default).</td></tr>';
         echo '</tbody></table>';
 
         echo '<div class="spa-about-note">';

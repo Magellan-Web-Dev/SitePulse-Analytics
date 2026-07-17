@@ -2,10 +2,10 @@
  * SitePulse Analytics — settings page script.
  *
  * Powers the webhook block repeater (layout ported from the Forms Webhook
- * Integrator plugin): "+ Add Additional URL" appends a new URL/label block,
- * each added block's Remove button deletes that block and re-indexes the
- * rest, and the "Webhook Status" toggle card is shown only while at least
- * one URL field currently has a value.
+ * Integrator plugin): "+ Add Additional URL" appends a new URL/label/secret
+ * block, each added block's Remove button deletes that block and re-indexes
+ * the rest, and the "Webhook Status" toggle card is shown only while at
+ * least one URL field currently has a value.
  */
 (function () {
     'use strict';
@@ -93,6 +93,12 @@
                     ' name="spa_settings[webhooks][' + index + '][label]"' +
                     ' placeholder="Label (optional — shown in the Delivery Log)"' +
                     ' aria-label="Webhook ' + (index + 1) + ' label">' +
+            '</div>' +
+            '<div style="margin-top:8px;">' +
+                '<input type="text" class="regular-text code spa-webhook-secret-input" autocomplete="off"' +
+                    ' name="spa_settings[webhooks][' + index + '][secret]"' +
+                    ' placeholder="Signing secret (optional — overrides the shared secret)"' +
+                    ' aria-label="Webhook ' + (index + 1) + ' signing secret">' +
             '</div>';
 
         var container = document.getElementById('spa-webhooks-container');
@@ -177,6 +183,11 @@
             var labelInput = block.querySelector('.spa-webhook-label-input');
             if (labelInput) {
                 labelInput.name = 'spa_settings[webhooks][' + idx + '][label]';
+            }
+
+            var secretInput = block.querySelector('.spa-webhook-secret-input');
+            if (secretInput) {
+                secretInput.name = 'spa_settings[webhooks][' + idx + '][secret]';
             }
 
             var removeBtn = block.querySelector('.spa-remove-webhook-btn');

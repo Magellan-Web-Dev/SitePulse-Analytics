@@ -12,7 +12,7 @@ use SitePulseAnalytics\Settings\Options;
  * Public REST endpoint that receives batched events from the frontend tracker.
  *
  * Route: POST /wp-json/sitepulse/v1/track
- * Body:  {"events": [{"type": "pageview", "page_url": "...", ...}, ...]}
+ * Body:  {"batch_id": "b3f2a9c1b8e0d", "events": [{"type": "pageview", ...}, ...]}
  *
  * The endpoint is intentionally unauthenticated — anonymous visitors are the
  * whole point — so it defends itself instead:
@@ -27,6 +27,14 @@ use SitePulseAnalytics\Settings\Options;
  *  - every field must be scalar and is sanitized and truncated before storage,
  *  - batches are capped per request, and rate limits are charged per *event*
  *    (not per request), both per-IP and site-wide (see 'spa_rate_limits').
+ *
+ * Delivery from the tracker is at-least-once: a batch whose response is lost
+ * is replayed by a later flush. The batch_id the tracker sends makes replays
+ * idempotent — rows are stored under a unique (batch_id, event ordinal) index
+ * and a replayed batch's rows are skipped instead of inflating every count.
+ * When the INSERT itself fails (e.g. the database is briefly unavailable) the
+ * endpoint answers 503 so the tracker keeps the batch persisted and retries,
+ * rather than acknowledging data that was never stored.
  *
  * None of this makes fabrication impossible — a determined sender can forge
  * any header — but it raises the bar well above drive-by pollution while
@@ -103,7 +111,9 @@ final class RestController
      * @param \WP_REST_Request $request The incoming request.
      * @return \WP_REST_Response 202 with {"stored": n}, 400 on a malformed
      *                           body, 403 on a foreign Origin/Referer, 413 on
-     *                           an oversized body, or 429 when rate-limited.
+     *                           an oversized body, 429 when rate-limited, or
+     *                           503 when the events could not be stored (the
+     *                           tracker keeps the batch and retries).
      */
     public static function handleTrack(\WP_REST_Request $request): \WP_REST_Response
     {
@@ -146,18 +156,41 @@ final class RestController
             return new \WP_REST_Response(['error' => 'rate_limited'], 429);
         }
 
+        // The tracker's batch id makes replayed batches idempotent (see the
+        // class docblock). A missing or malformed id (an old cached tracker,
+        // a hand-crafted request) falls back to null — those inserts are not
+        // deduplicated, matching pre-batch-id behavior.
+        $batchId = null;
+        if (isset($body['batch_id']) && is_string($body['batch_id'])
+            && preg_match('~^[A-Za-z0-9_\-]{8,40}$~', $body['batch_id'])
+        ) {
+            $batchId = $body['batch_id'];
+        }
+
         $device = wp_is_mobile() ? 'mobile' : 'desktop';
         $batch  = [];
 
-        foreach ($events as $event) {
+        foreach ($events as $index => $event) {
             $sanitized = self::sanitizeEvent($event, $device);
             if ($sanitized !== null) {
-                $batch[] = $sanitized;
+                // 'seq' is the event's position in the ORIGINAL batch — the
+                // stable half of the (batch_id, seq) dedup key, unaffected by
+                // how many neighboring events sanitization drops.
+                $sanitized['seq'] = (int) $index;
+                $batch[]          = $sanitized;
             }
         }
 
         // One multi-row INSERT instead of one query per event.
-        $stored = DatabaseManager::insertEvents($batch);
+        $stored = DatabaseManager::insertEvents($batch, $batchId);
+
+        // A failed INSERT must not be acknowledged: a 2xx would make the
+        // tracker discard the batch permanently, silently losing analytics
+        // during a transient database outage. 503 keeps the batch persisted
+        // client-side; the batch id deduplicates the eventual replay.
+        if ($stored === false) {
+            return new \WP_REST_Response(['error' => 'storage_unavailable'], 503);
+        }
 
         return new \WP_REST_Response(['stored' => $stored], 202);
     }
@@ -521,7 +554,8 @@ final class RestController
      * Adds $events to one rolling counter and reports whether it is under $max.
      *
      * Uses an atomic object-cache increment when a persistent object cache is
-     * available; otherwise an atomic single-statement counter in the options
+     * available; otherwise — and whenever the cache increment fails — an
+     * atomic single-statement counter in the options
      * table (INSERT … ON DUPLICATE KEY UPDATE, so concurrent requests can
      * never all read one stale count and be accepted together — the cap is a
      * hard bound either way). The row stores "window|count" and resets itself
@@ -540,7 +574,13 @@ final class RestController
             wp_cache_add($key, 0, self::CACHE_GROUP, self::RATE_LIMIT_WINDOW);
             $count = wp_cache_incr($key, $events, self::CACHE_GROUP);
 
-            return $count === false ? true : $count <= $max;
+            if ($count !== false) {
+                return $count <= $max;
+            }
+            // The increment failed (key evicted between add and incr, or the
+            // cache backend errored). Fail CLOSED into the database counter
+            // below rather than waving the request through — a flaky cache
+            // must not silently disable the rate limit.
         }
 
         global $wpdb;

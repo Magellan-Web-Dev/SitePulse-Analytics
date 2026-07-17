@@ -43,6 +43,18 @@ use SitePulseAnalytics\Settings\Options;
  *  (also sent as an Idempotency-Key header) is sufficient to never
  *  double-count.
  *
+ *  Frozen deliveries do not live forever: a chain whose delivery was frozen
+ *  longer ago than the data retention window is dropped by the next dispatch
+ *  run (the site no longer holds the underlying events either), and the
+ *  settings page offers an explicit Discard action per pending retry.
+ *
+ *  Every mutation of the shared retry-state option happens while holding the
+ *  dispatch mutex. A retry that cannot acquire the lock only re-schedules its
+ *  cron event and touches nothing else; if even that fails, the chain is
+ *  detected as ORPHANED by the next dispatch run (state pending, but no cron
+ *  event scheduled and well past due) and resumed exactly like an exhausted
+ *  one — under the same frozen bytes and delivery_id.
+ *
  * Delivery scatter:
  *  The recurring cron is anchored at a random offset within the send interval
  *  (capped at 24 hours) rather than at the moment of scheduling. When many
@@ -276,11 +288,12 @@ final class WebhookDispatcher
             $state = self::getRetryStates()[md5($url)] ?? null;
 
             if ($state !== null) {
-                if (empty($state['exhausted'])) {
+                if (self::retryChainActive($url, $state)) {
                     continue; // An active retry chain owns this endpoint.
                 }
 
-                // Resume the exhausted chain: same frozen bytes, same id.
+                // Resume the exhausted (or orphaned) chain: same frozen
+                // bytes, same id.
                 self::renewLock($lock);
                 $delivery = self::deliveryFromState($url, $state);
 
@@ -339,45 +352,45 @@ final class WebhookDispatcher
      * delivery is kept in an exhausted state so the next scheduled dispatch
      * resumes it instead of moving on to an overlapping window.
      *
+     * Every retry-state mutation happens while holding the dispatch mutex.
+     * A retry that finds the lock taken only re-schedules its own cron event
+     * and returns — writing the shared state option here would race the lock
+     * holder, which may be clearing this very chain (delivery acknowledged)
+     * or replacing it, and the unlocked write could resurrect or erase it.
+     * If the re-schedule fails too, nothing is lost: the chain still says
+     * "pending" with no cron event behind it, which the next dispatch run
+     * detects as orphaned (see {@see retryChainActive()}) and resumes under
+     * the same frozen bytes and delivery_id.
+     *
      * @param string $url The endpoint URL this retry targets.
      * @return void
      */
     public static function retry(string $url): void
     {
-        // The endpoint was removed from settings after this retry was scheduled.
-        if (!in_array($url, Options::webhookUrls(), true)) {
-            self::clearRetry($url);
-            return;
-        }
-
-        // Retries share the dispatch mutex — a retry advancing this
-        // endpoint's marker while a dispatch run reads it would race the
-        // bookkeeping. When a dispatch run holds the lock, re-run this same
-        // attempt shortly instead of consuming it.
         $lock = self::acquireLock();
         if ($lock === null) {
-            $when      = time() + MINUTE_IN_SECONDS;
-            $scheduled = wp_schedule_single_event($when, self::RETRY_HOOK, [$url]) !== false;
-
-            $states = self::getRetryStates();
-            $key    = md5($url);
-            if (isset($states[$key])) {
-                if ($scheduled) {
-                    $states[$key]['scheduled_for'] = $when;
-                } else {
-                    // Couldn't re-schedule — flip the chain to exhausted so
-                    // the next scheduled dispatch resumes the frozen delivery
-                    // instead of skipping this endpoint forever.
-                    $states[$key]['scheduled_for'] = 0;
-                    $states[$key]['exhausted']     = true;
-                }
-                update_option(self::RETRY_STATE_OPTION, $states, false);
-            }
+            wp_schedule_single_event(time() + MINUTE_IN_SECONDS, self::RETRY_HOOK, [$url]);
             return;
         }
 
         try {
-            $state    = self::getRetryStates()[md5($url)] ?? [];
+            // The endpoint was removed from settings after this retry was
+            // scheduled. Checked under the lock, like every state mutation.
+            if (!in_array($url, Options::webhookUrls(), true)) {
+                self::clearRetry($url);
+                return;
+            }
+
+            $state = self::getRetryStates()[md5($url)] ?? null;
+
+            // No stored state means the frozen delivery was already
+            // acknowledged (or explicitly discarded) while this cron event
+            // was in flight. Building a fresh delivery here would violate
+            // the same-bytes/same-delivery-id guarantee — stop instead.
+            if ($state === null) {
+                return;
+            }
+
             $attempt  = (int) ($state['attempt'] ?? 1);
             $delivery = self::deliveryFromState($url, $state);
 
@@ -393,6 +406,34 @@ final class WebhookDispatcher
         } finally {
             self::releaseLock($lock);
         }
+    }
+
+    /**
+     * Whether an endpoint's retry chain still has a live cron attempt coming.
+     *
+     * Exhausted chains never do — dispatch resumes them. A chain that claims
+     * to be pending but has no retry cron event scheduled and whose due time
+     * has clearly passed is ORPHANED: its wp_schedule_single_event() call
+     * failed (typically while re-scheduling around a held lock, where state
+     * is deliberately never written). Orphaned chains are resumed by dispatch
+     * exactly like exhausted ones. The grace period covers ordinary WP-Cron
+     * lag, so a merely-late retry is not mistaken for a dead one.
+     *
+     * @param string               $url   Endpoint URL.
+     * @param array<string, mixed> $state The endpoint's stored retry state.
+     * @return bool
+     */
+    private static function retryChainActive(string $url, array $state): bool
+    {
+        if (!empty($state['exhausted'])) {
+            return false;
+        }
+
+        if (wp_next_scheduled(self::RETRY_HOOK, [$url]) !== false) {
+            return true;
+        }
+
+        return (int) ($state['scheduled_for'] ?? 0) > time() - 15 * MINUTE_IN_SECONDS;
     }
 
     /**
@@ -494,6 +535,44 @@ final class WebhookDispatcher
     }
 
     /**
+     * Discards one endpoint's pending retry chain — the cron event and the
+     * stored frozen delivery — on explicit admin request from the settings
+     * page.
+     *
+     * The underlying analytics rows are untouched: the endpoint's last-sent
+     * marker does not advance, so its next scheduled delivery covers the
+     * discarded window's data again, just under a NEW delivery_id. If the
+     * receiver actually processed the frozen delivery (only its response was
+     * lost), that data can be double-counted — the settings page says so
+     * next to the action. Runs under the dispatch mutex like every other
+     * retry-state mutation.
+     *
+     * @param string $urlKey md5 of the endpoint URL (as keyed in the state map).
+     * @return bool True when done; false when the dispatch lock was busy —
+     *              the caller should ask the admin to try again shortly.
+     */
+    public static function discardRetry(string $urlKey): bool
+    {
+        $lock = self::acquireLock();
+        if ($lock === null) {
+            return false;
+        }
+
+        try {
+            foreach (self::getRetryStates() as $key => $state) {
+                if ($key === $urlKey) {
+                    self::clearRetry((string) ($state['url'] ?? ''));
+                    break;
+                }
+            }
+
+            return true;
+        } finally {
+            self::releaseLock($lock);
+        }
+    }
+
+    /**
      * Unschedules every pending retry cron event but KEEPS the frozen
      * delivery state, marking each chain exhausted.
      *
@@ -505,23 +584,42 @@ final class WebhookDispatcher
      * scheduled dispatch after reactivation re-sends the frozen bytes under
      * the original id, so duplicates remain deduplicable.
      *
+     * The exhausted mark is written under the dispatch mutex like every
+     * other retry-state mutation — an unlocked whole-map write here could
+     * erase a chain the lock holder froze (or resurrect one it cleared)
+     * between this function's read and write. When the mutex is busy (a
+     * dispatch run is mid-flight during deactivation), the mark is simply
+     * skipped: it is an accelerant, not a requirement — a chain whose cron
+     * events vanished is detected as ORPHANED by the first dispatch after
+     * reactivation (see {@see retryChainActive()}) and resumed under the
+     * same frozen bytes and delivery_id anyway.
+     *
      * @return void
      */
     public static function suspendAllRetries(): void
     {
         wp_unschedule_hook(self::RETRY_HOOK);
 
-        $states = self::getRetryStates();
-        if ($states === []) {
+        $lock = self::acquireLock();
+        if ($lock === null) {
             return;
         }
 
-        foreach ($states as $key => $state) {
-            $states[$key]['scheduled_for'] = 0;
-            $states[$key]['exhausted']     = true;
-        }
+        try {
+            $states = self::getRetryStates();
+            if ($states === []) {
+                return;
+            }
 
-        update_option(self::RETRY_STATE_OPTION, $states, false);
+            foreach (array_keys($states) as $key) {
+                $states[$key]['scheduled_for'] = 0;
+                $states[$key]['exhausted']     = true;
+            }
+
+            update_option(self::RETRY_STATE_OPTION, $states, false);
+        } finally {
+            self::releaseLock($lock);
+        }
     }
 
     /**
@@ -729,8 +827,18 @@ final class WebhookDispatcher
     private static function storeRetryState(string $url, int $attempt, int $scheduledFor, array $delivery, bool $exhausted): void
     {
         $states = self::getRetryStates();
+        $key    = md5($url);
 
-        $states[md5($url)] = [
+        // frozen_at marks when this DELIVERY first froze, not when the state
+        // row was last rewritten — later attempts in the same chain must not
+        // refresh it, or the retention-window expiry (see pruneStaleState())
+        // would never trigger for a persistently failing endpoint.
+        $existing = $states[$key] ?? null;
+        $frozenAt = ($existing !== null && (string) ($existing['delivery_id'] ?? '') === $delivery['delivery_id'])
+            ? (int) ($existing['frozen_at'] ?? time())
+            : time();
+
+        $states[$key] = [
             'url'           => $url,
             'attempt'       => $attempt,
             'scheduled_for' => $scheduledFor,
@@ -739,6 +847,7 @@ final class WebhookDispatcher
             'delivery_id'   => $delivery['delivery_id'],
             'body'          => $delivery['body'],
             'exhausted'     => $exhausted,
+            'frozen_at'     => $frozenAt,
         ];
 
         update_option(self::RETRY_STATE_OPTION, $states, false);
@@ -960,7 +1069,11 @@ final class WebhookDispatcher
 
     /**
      * Drops bookkeeping (last-sent timestamps and retry chains) for endpoints
-     * that are no longer in settings.
+     * that are no longer in settings, and expires frozen deliveries older
+     * than the data retention window — the analytics rows they were built
+     * from are gone by then, and a chain kept forever would pin its stored
+     * body in wp_options indefinitely for an endpoint that never recovers.
+     * Runs under the dispatch mutex.
      *
      * @param string[] $activeUrls Currently configured endpoint URLs.
      * @return void
@@ -974,8 +1087,18 @@ final class WebhookDispatcher
             update_option(self::LAST_SENT_OPTION, array_intersect_key($lastSent, array_flip($activeKeys)), false);
         }
 
+        $expiry = time() - Options::retentionDays() * DAY_IN_SECONDS;
+
         foreach (self::getRetryStates() as $key => $state) {
             if (!in_array($key, $activeKeys, true)) {
+                self::clearRetry((string) ($state['url'] ?? ''));
+                continue;
+            }
+
+            // States written before frozen_at existed fall back to the frozen
+            // window's end — the moment the delivery could first have frozen.
+            $frozenAt = (int) ($state['frozen_at'] ?? $state['window_end'] ?? 0);
+            if ($frozenAt > 0 && $frozenAt < $expiry) {
                 self::clearRetry((string) ($state['url'] ?? ''));
             }
         }
@@ -1110,7 +1233,9 @@ final class WebhookDispatcher
      *
      * When a signing secret is configured, the request also carries an
      * X-SPA-Signature header: 'sha256=' followed by the HMAC-SHA256 (hex) of
-     * the exact body bytes, keyed with the secret. Computed at send time, so
+     * the exact body bytes, keyed with the secret — the endpoint's own secret
+     * when one is set on its webhook block, otherwise the shared secret (see
+     * {@see Options::webhookSecretFor()}). Computed at send time, so
      * a retry re-signs the identical frozen bytes — the signature only
      * changes if the secret itself is rotated between attempts, which is
      * exactly what a receiver validating against its current secret expects.
@@ -1128,7 +1253,7 @@ final class WebhookDispatcher
             'Idempotency-Key' => $deliveryId,
         ];
 
-        $secret = Options::webhookSecret();
+        $secret = Options::webhookSecretFor($url);
         if ($secret !== '') {
             $headers['X-SPA-Signature'] = 'sha256=' . hash_hmac('sha256', $body, $secret);
         }

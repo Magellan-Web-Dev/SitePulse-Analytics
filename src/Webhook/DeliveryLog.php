@@ -5,6 +5,7 @@ namespace SitePulseAnalytics\Webhook;
 
 if (!defined('ABSPATH')) exit;
 
+use SitePulseAnalytics\Database\DatabaseManager;
 use SitePulseAnalytics\Settings\Options;
 
 /**
@@ -96,7 +97,16 @@ final class DeliveryLog
 
         dbDelta($sql);
 
-        update_option(self::DB_VERSION_OPTION, self::DB_VERSION);
+        // Only record the schema version once the table verifiably carries
+        // every expected column — a failed or partial dbDelta run must be
+        // retried on the next load, not silently marked complete.
+        $expected = [
+            'id', 'success', 'endpoint_url', 'delivery_id', 'kind', 'attempt',
+            'request_data', 'response_code', 'response_data', 'created_at',
+        ];
+        if (DatabaseManager::tableHasColumns($table, $expected)) {
+            update_option(self::DB_VERSION_OPTION, self::DB_VERSION);
+        }
     }
 
     /**
@@ -198,11 +208,19 @@ final class DeliveryLog
      */
     private static function redactSensitiveJson(string $body): string
     {
-        if ($body === '' || ($body[0] !== '{' && $body[0] !== '[')) {
+        // Strip a UTF-8 BOM and leading whitespace before sniffing — valid
+        // JSON is allowed to start with either, and skipping redaction just
+        // because of a leading newline would store secrets verbatim.
+        $json = ltrim($body, " \t\n\r\0\x0B");
+        if (str_starts_with($json, "\xEF\xBB\xBF")) {
+            $json = ltrim(substr($json, 3), " \t\n\r\0\x0B");
+        }
+
+        if ($json === '' || ($json[0] !== '{' && $json[0] !== '[')) {
             return $body;
         }
 
-        $decoded = json_decode($body, true);
+        $decoded = json_decode($json, true);
         if (!is_array($decoded)) {
             return $body;
         }
