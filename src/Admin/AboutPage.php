@@ -139,7 +139,7 @@ final class AboutPage
             ],
             [
                 'title' => 'Confirmed Conversions',
-                'text'  => 'A separate form_success event fires only when the form plugin reports the server accepted the submission (Elementor Pro, Contact Form 7, WPForms, Gravity Forms — or a custom spa:conversion event). Each conversion gets a unique id and a snapshot of the session\'s campaign attribution.',
+                'text'  => 'A separate form_success event fires only when the form plugin reports the server accepted the submission (Elementor Pro, Contact Form 7, WPForms, Gravity Forms — or a custom spa:conversion event). These integrations detect AJAX submissions; a traditional non-AJAX form that navigates away has no success event to observe — dispatch spa:conversion (e.g. on the thank-you page) for those. Each conversion gets a unique id and a snapshot of the session\'s campaign attribution.',
             ],
             [
                 'title' => 'Campaigns & Channels',
@@ -238,9 +238,11 @@ final class AboutPage
         echo '<pre class="spa-about-code">POST ' . esc_html(rest_url('sitepulse/v1/track')) . '</pre>';
 
         echo '<p>Batches flush every few seconds and on page exit via <code>navigator.sendBeacon</code>, '
-            . 'so events are not lost when a visitor navigates away. Batches that fail with a network error or '
-            . 'a 5xx response are kept in a bounded <code>sessionStorage</code> map and resent by later flushes — '
-            . 'even by the next page in that tab if navigation destroyed the one that failed. Every event carries the '
+            . 'so events are not lost when a visitor navigates away. Every batch is persisted to a bounded '
+            . '<code>sessionStorage</code> map <em>before</em> it is sent and removed only when the server '
+            . 'acknowledges it, so batches survive the page being destroyed mid-flight and are resent by later '
+            . 'flushes — even by the next page in that tab. Fetch-delivered batches are at-least-once; page-exit '
+            . 'beacon hand-offs are best-effort (an accepted hand-off counts as delivered). Every event carries the '
             . 'session\'s attribution snapshot — the utm fields, click-identifier type, and <code>session_referrer</code> '
             . '(the referrer the session entered through, used to classify the marketing channel; not stored as its own '
             . 'field) — so clicks, form attempts, and scroll milestones can be segmented by campaign, not just pageviews '
@@ -324,6 +326,11 @@ final class AboutPage
             . 'UTM parameters. Ad-click identifiers (<code>gclid</code>, <code>fbclid</code>, …) are recognized, but only '
             . 'the parameter <em>name</em> is stored — the identifier value never leaves the browser. '
             . 'Clicked <code>mailto:</code>/<code>tel:</code> destinations are stored whole.</li>';
+        echo '<li>URL <em>paths</em>, page titles, element labels, and form names are stored as visitors see them — '
+            . 'if your site embeds personal data in any of those (e.g. <code>/reset/&lt;token&gt;/</code> or an email '
+            . 'in a title), exclude or rewrite the affected fields with the <code>spa_tracked_event</code> filter. '
+            . 'The Delivery Log stores each delivery\'s payload and response (sensitive-looking keys in JSON responses '
+            . 'are redacted automatically; non-JSON response bodies are stored as received, truncated to 64 KB).</li>';
         echo '<li>Optionally, visitors sending Do Not Track / Global Privacy Control signals can be excluded entirely '
             . '(off by default; toggle in Settings) — enforced both client-side and, as a backstop, at the REST endpoint.</li>';
         echo '<li>No IP addresses or user agents are stored — only a coarse mobile/desktop device bucket. '
@@ -364,7 +371,9 @@ final class AboutPage
             . 'a window holding more than 100 conversions is split into consecutive, non-overlapping deliveries (worked '
             . 'off within the same run) rather than dropping the overflow.</p>';
 
-        echo '<p>Failed deliveries are retried automatically up to 5 more times over about 24 hours '
+        echo '<p>Deliveries run under a site-wide dispatch lock, so overlapping cron executions can never send '
+            . 'overlapping reporting windows, and endpoints sharing the same window share one computed summary '
+            . 'per run. Failed deliveries are retried automatically up to 5 more times over about 24 hours '
             . '(after 5 minutes, 30 minutes, 2 hours, 6 hours, and 16 hours). The exact JSON body that failed is frozen '
             . 'and every retry — including retries resumed after an exhausted chain — re-sends the identical bytes under '
             . 'the same <code>delivery_id</code> (also sent as an <code>Idempotency-Key</code> header), so deduplicating '
@@ -377,7 +386,7 @@ final class AboutPage
         echo '<pre class="spa-about-code">' . esc_html(
             (string) wp_json_encode([
                 'source'         => 'sitepulse-analytics',
-                'plugin_version' => defined('SPA_VERSION') ? SPA_VERSION : '1.5.0',
+                'plugin_version' => defined('SPA_VERSION') ? SPA_VERSION : '1.6.0',
                 'website_info'   => [
                     'name'   => get_bloginfo('name'),
                     'url'    => home_url(),
@@ -537,7 +546,10 @@ final class AboutPage
         echo '<pre class="spa-about-code">' . esc_html(
             "spa_track_event('purchase', [\n    'page_url'      => home_url('/checkout/'),\n    'element_label' => 'Order #1234',\n    'event_value'   => '99.00',\n]);"
         ) . '</pre>';
-        echo '<p>Custom event types appear in the dashboard\'s "Other Events" card, in totals, and in webhook payloads under their own type key.</p>';
+        echo '<p>Custom event types appear in the dashboard\'s "Other Events" card, in totals, and in webhook payloads under their own type key. '
+            . 'Note: recording a <code>form_success</code> event server-side requires <code>event_value</code> to be a '
+            . 'unique conversion id (8–100 characters of <code>A-Za-z0-9_.:-</code>) — events without one are rejected at '
+            . 'every write path so conversion deduplication stays consistent.</p>';
 
         echo '<p>Record a confirmed conversion from frontend JavaScript — a <code>form_success</code> event with the '
             . 'session\'s attribution snapshot and a unique conversion id — by dispatching a DOM event. Use this for '

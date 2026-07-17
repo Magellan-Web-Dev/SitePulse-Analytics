@@ -355,25 +355,70 @@ final class GitHubUpdater
             return $response;
         }
 
-        // If a stale correctly-named directory exists, back it up so we can
-        // restore it if the rename below fails.
+        // If a correctly-named directory exists (the currently installed
+        // version), move it to a backup so it can be restored if the rename
+        // below fails. If the backup move itself fails, ABORT the whole
+        // normalization: deleting the working copy as a fallback could leave
+        // the site with no plugin at all when the subsequent rename also
+        // failed. Aborting keeps the current version installed and active —
+        // the update simply didn't take effect.
         $backup_dir = null;
         if ($wp_filesystem->is_dir($desired_dir)) {
             $backup_dir = $desired_dir . '_spa_backup';
+
+            // A stale backup from an earlier interrupted run would make the
+            // move below fail; it is redundant by definition, so clear it.
+            if ($wp_filesystem->is_dir($backup_dir)) {
+                $wp_filesystem->delete($backup_dir, true);
+            }
+
             if (!$wp_filesystem->move($desired_dir, $backup_dir)) {
-                // Can't move the stale dir out of the way — fall back to deleting it.
-                $wp_filesystem->delete($desired_dir, true);
-                $backup_dir = null;
+                // The freshly extracted directory is removed so it cannot
+                // linger as a duplicate plugin entry; the current working
+                // copy is untouched.
+                $wp_filesystem->delete($installed_dir, true);
+
+                return new \WP_Error(
+                    'spa_update_backup_failed',
+                    'SitePulse Analytics update aborted: the existing plugin folder could not be backed up, so the currently installed version was left in place.'
+                );
             }
         }
 
         // Move to the canonical folder name.
         if (!$wp_filesystem->move($installed_dir, $desired_dir)) {
-            // Rename failed; restore the backup so the plugin is not left missing.
-            if ($backup_dir && $wp_filesystem->is_dir($backup_dir)) {
-                $wp_filesystem->move($backup_dir, $desired_dir);
+            // Rename failed; restore the backup so the plugin is not left
+            // missing — and VERIFY the restore, because claiming "restored"
+            // while the canonical directory is actually empty would send an
+            // admin looking in the wrong place.
+            $restored = $backup_dir !== null
+                && $wp_filesystem->is_dir($backup_dir)
+                && $wp_filesystem->move($backup_dir, $desired_dir)
+                && $wp_filesystem->is_dir($desired_dir);
+
+            // Remove the extracted directory that could not be renamed so it
+            // does not linger as a duplicate plugin entry.
+            if ($wp_filesystem->is_dir($installed_dir)) {
+                $wp_filesystem->delete($installed_dir, true);
             }
-            return $response;
+
+            if ($backup_dir !== null && !$restored) {
+                return new \WP_Error(
+                    'spa_update_restore_failed',
+                    sprintf(
+                        'SitePulse Analytics update failed: the new version could not be moved into place AND the previous version could not be restored automatically. The previous version is preserved at %s — rename that folder to %s (e.g. via FTP or your host\'s file manager) to restore the plugin.',
+                        $backup_dir,
+                        $desired_dir
+                    )
+                );
+            }
+
+            return new \WP_Error(
+                'spa_update_rename_failed',
+                $restored
+                    ? 'SitePulse Analytics update aborted: the new version could not be moved into place, so the previously installed version was restored.'
+                    : 'SitePulse Analytics update aborted: the new version could not be moved into the plugin folder.'
+            );
         }
 
         // Rename succeeded — remove the backup.

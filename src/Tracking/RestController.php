@@ -203,6 +203,19 @@ final class RestController
             return null;
         }
 
+        // A confirmed conversion without a usable conversion id would break
+        // the dedup guarantee downstream: conversion counts use
+        // COUNT(DISTINCT event_value) (empty ids vanish) while conversion
+        // listings collapse every empty id into one record — the numbers
+        // would silently disagree. The tracker always generates one
+        // ('c' + 16 hex chars), so a form_success without a valid, bounded
+        // id is rejected outright.
+        if ($type === 'form_success'
+            && !preg_match('~^[A-Za-z0-9_.:\-]{8,100}$~', self::scalarString($event['event_value'] ?? ''))
+        ) {
+            return null;
+        }
+
         $data = [
             'page_url'      => $pageUrl,
             'page_title'    => self::scalarString($event['page_title'] ?? ''),
@@ -456,8 +469,14 @@ final class RestController
         $limits = self::rateLimits();
         $ip     = self::clientIp();
 
-        $ipAllowed = $ip === ''
-            || self::chargeBucket('spa_rl_' . md5($ip), $events, $limits['per_ip']);
+        // Per-IP first, and reject WITHOUT touching the site-wide bucket:
+        // charging the global budget for already-rejected requests would let
+        // a single flooding IP burn through the entire site-wide allowance
+        // with traffic that was never going to be stored, blocking
+        // legitimate visitors for the rest of the window.
+        if ($ip !== '' && !self::chargeBucket('spa_rl_' . md5($ip), $events, $limits['per_ip'])) {
+            return false;
+        }
 
         $siteAllowed = self::chargeBucket('spa_rl_site', $events, $limits['site_wide']);
 
@@ -469,7 +488,7 @@ final class RestController
             set_transient(self::RATE_LIMITED_FLAG, time(), DAY_IN_SECONDS);
         }
 
-        return $ipAllowed && $siteAllowed;
+        return $siteAllowed;
     }
 
     /**
@@ -502,9 +521,13 @@ final class RestController
      * Adds $events to one rolling counter and reports whether it is under $max.
      *
      * Uses an atomic object-cache increment when a persistent object cache is
-     * available; otherwise falls back to a transient read-modify-write, which
-     * is best-effort under concurrency but always within a constant factor of
-     * the cap.
+     * available; otherwise an atomic single-statement counter in the options
+     * table (INSERT … ON DUPLICATE KEY UPDATE, so concurrent requests can
+     * never all read one stale count and be accepted together — the cap is a
+     * hard bound either way). The row stores "window|count" and resets itself
+     * whenever the minute-window rolls over, so counters never accumulate
+     * per-window rows; rows are purged by the daily cleanup cron and on
+     * uninstall.
      *
      * @param string $key    Counter key.
      * @param int    $events Amount to charge.
@@ -520,14 +543,42 @@ final class RestController
             return $count === false ? true : $count <= $max;
         }
 
-        $count = (int) get_transient($key);
-        if ($count + $events > $max) {
-            return false;
-        }
+        global $wpdb;
 
-        set_transient($key, $count + $events, self::RATE_LIMIT_WINDOW);
+        $window = (string) intdiv(time(), self::RATE_LIMIT_WINDOW);
 
-        return true;
+        // Atomic: the IF() either increments the current window's count or
+        // resets the row for a new window, all inside one statement. These
+        // rows are written directly (never through get_option/update_option)
+        // so they bypass — and can never pollute — WordPress's option caches.
+        $wpdb->query($wpdb->prepare(
+            "INSERT INTO {$wpdb->options} (option_name, option_value, autoload)
+             VALUES (%s, %s, 'off')
+             ON DUPLICATE KEY UPDATE option_value = IF(
+                 SUBSTRING_INDEX(option_value, '|', 1) = %s,
+                 CONCAT(%s, '|', CAST(SUBSTRING_INDEX(option_value, '|', -1) AS UNSIGNED) + %d),
+                 VALUES(option_value)
+             )",
+            $key,
+            $window . '|' . $events,
+            $window,
+            $window,
+            $events
+        ));
+
+        $value = (string) $wpdb->get_var($wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s",
+            $key
+        ));
+
+        // The read runs after the increment, so under heavy concurrency it
+        // may see later charges too — the count is >= this request's true
+        // position, which can only over-reject at the margin, never let the
+        // stored volume exceed the cap.
+        $parts = explode('|', $value);
+        $count = (count($parts) === 2 && $parts[0] === $window) ? (int) $parts[1] : $events;
+
+        return $count <= $max;
     }
 
     /**

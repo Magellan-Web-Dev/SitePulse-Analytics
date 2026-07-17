@@ -2,7 +2,7 @@
 /**
  * Plugin Name: SitePulse Analytics
  * Description: Tracks page views, link and button clicks, form submissions, hover activity, scroll depth, and other visitor interactions. Analytics are displayed in the WordPress dashboard and can be sent on a schedule as JSON to one or more webhook endpoints.
- * Version:     1.5.0
+ * Version:     1.6.0
  * Requires at least: 6.3
  * Requires PHP: 8.1
  * Author:      Chris Paschall
@@ -38,7 +38,7 @@ if (version_compare(PHP_VERSION, '8.1', '<')) {
  */
 } else {
 
-    define('SPA_VERSION', '1.5.0');
+    define('SPA_VERSION', '1.6.0');
     define('SPA_PLUGIN_FILE', __FILE__);
     define('SPA_PLUGIN_DIR', plugin_dir_path(__FILE__));
     define('SPA_PLUGIN_URL', plugin_dir_url(__FILE__));
@@ -109,6 +109,11 @@ if (version_compare(PHP_VERSION, '8.1', '<')) {
      *                                   session's entrance referrer — used for
      *                                   channel classification, not stored).
      *                                   Unknown keys are ignored.
+     *                                   Note: a 'form_success' event requires
+     *                                   'event_value' to be a unique conversion
+     *                                   id (8–100 chars of A-Za-z0-9_.:-);
+     *                                   events without one are rejected so
+     *                                   conversion dedup stays consistent.
      * @return bool True when the event row was stored.
      */
     function spa_track_event($type, array $data = array())

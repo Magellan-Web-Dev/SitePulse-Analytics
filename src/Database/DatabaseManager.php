@@ -30,7 +30,7 @@ final class DatabaseManager
     private const DB_VERSION_OPTION = 'spa_db_version';
 
     /** @var string Current schema version; bump when the CREATE TABLE below changes. */
-    private const DB_VERSION = '1.2.0';
+    private const DB_VERSION = '1.3.0';
 
     /**
      * Returns the fully-prefixed events table name.
@@ -84,6 +84,7 @@ final class DatabaseManager
             created_at DATETIME NOT NULL,
             PRIMARY KEY  (id),
             KEY type_date (event_type,created_at),
+            KEY type_session_date (event_type,session_id,created_at),
             KEY created_at (created_at),
             KEY page_url (page_url(191))
         ) {$charset};";
@@ -106,6 +107,14 @@ final class DatabaseManager
             self::createTable();
         }
     }
+
+    /**
+     * @var string[] Event types that carry campaign attribution and therefore
+     *      get a marketing channel derived at ingestion — every tracker event
+     *      type, so clicks, form attempts, hovers, and scroll milestones can
+     *      be segmented by channel just like pageviews and conversions.
+     */
+    private const ATTRIBUTED_TYPES = ['pageview', 'click', 'form_submit', 'form_success', 'hover', 'scroll_depth'];
 
     /** @var string[] Insertable columns, in the order bulk inserts serialize them. */
     private const COLUMNS = [
@@ -199,6 +208,20 @@ final class DatabaseManager
             return null;
         }
 
+        // A confirmed conversion without a usable conversion id breaks the
+        // dedup invariant every report relies on: COUNT(DISTINCT event_value)
+        // ignores empty ids while conversion listings collapse them into one
+        // record, so the numbers silently disagree. Enforced HERE — the one
+        // choke point every write path shares (REST ingestion, the
+        // spa_track_event() helper, future importers) — not only at the REST
+        // layer.
+        if ($type === 'form_success') {
+            $conversionId = $data['event_value'] ?? '';
+            if (!is_scalar($conversionId) || !preg_match('~^[A-Za-z0-9_.:\-]{8,100}$~', (string) $conversionId)) {
+                return null;
+            }
+        }
+
         $row = [
             'event_type'    => $type,
             'page_url'      => self::truncate(esc_url_raw((string) ($data['page_url'] ?? '')), 255),
@@ -232,7 +255,7 @@ final class DatabaseManager
             $row['click_id_type'] = '';
         }
 
-        if ($row['channel'] === '' && ($type === 'pageview' || $type === 'form_success')) {
+        if ($row['channel'] === '' && in_array($type, self::ATTRIBUTED_TYPES, true)) {
             // session_referrer — the referrer the session entered through,
             // persisted by the tracker — feeds classification only; it is
             // not a stored column, so it never reaches the INSERT.
@@ -292,6 +315,14 @@ final class DatabaseManager
                 )
             );
         } while (is_int($deleted) && $deleted === self::CLEANUP_CHUNK && ++$runs < self::CLEANUP_MAX_CHUNKS);
+
+        // Rate-limit counter rows (written directly to the options table by
+        // the REST controller when no persistent object cache is available;
+        // one row per recently seen IP hash plus the site-wide bucket). Each
+        // row self-resets when its minute-window rolls over, but rows for
+        // IPs never seen again would otherwise linger forever. At worst this
+        // resets counters mid-window once a day — negligible.
+        $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE 'spa\\_rl\\_%'");
     }
 
     /**

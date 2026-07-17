@@ -50,6 +50,16 @@ use SitePulseAnalytics\Settings\Options;
  *  deliveries land at different, stable times of day instead of stampeding
  *  the endpoint simultaneously.
  *
+ * Concurrency:
+ *  A dispatch run can perform up to ten report windows per endpoint, each
+ *  involving many aggregate queries and an HTTP request with a 15-second
+ *  timeout — long enough to overlap the next cron trigger. Every dispatch
+ *  (and every retry) therefore runs under a site-wide mutex (see
+ *  {@see acquireLock()}): overlapping cron executions can never read the
+ *  same last-sent marker and build overlapping windows under different
+ *  delivery IDs. A run that cannot get the lock simply yields — the run
+ *  holding it is already doing the work.
+ *
  * Every delivery attempt — scheduled, retry, or test — is recorded in the
  * {@see DeliveryLog} table with the exact payload sent and the response
  * received, powering the Delivery Log admin page and the read-only
@@ -76,6 +86,21 @@ final class WebhookDispatcher
 
     /** @var string Option key mapping md5(endpoint URL) → pending retry state. */
     private const RETRY_STATE_OPTION = 'spa_webhook_retry_state';
+
+    /** @var string Option key for the fallback dispatch mutex (when GET_LOCK is unavailable). */
+    private const LOCK_OPTION = 'spa_webhook_dispatch_lock';
+
+    /**
+     * Seconds after which a fallback option lock's LEASE is considered stale
+     * and the lock may be stolen. Healthy runs renew their lease between
+     * delivery windows (see {@see renewLock()}), so even a run that legally
+     * exceeds this duration is never mistaken for dead — only a lock whose
+     * holder stopped renewing (fatal error, killed process) goes stale, and
+     * then dispatch is wedged for at most this long.
+     *
+     * @var int
+     */
+    private const LOCK_TIMEOUT = 15 * MINUTE_IN_SECONDS;
 
     /** @var int HTTP timeout for webhook requests, in seconds. */
     private const TIMEOUT = 15;
@@ -209,7 +234,43 @@ final class WebhookDispatcher
             return;
         }
 
+        // Only one dispatch may run at a time: two overlapping runs would
+        // read the same last-sent marker and deliver overlapping windows
+        // under different delivery IDs, breaking the dedup guarantee. The
+        // run already holding the lock is doing this exact work.
+        $lock = self::acquireLock();
+        if ($lock === null) {
+            return;
+        }
+
+        try {
+            self::dispatchLocked($urls, $lock);
+        } finally {
+            self::releaseLock($lock);
+        }
+    }
+
+    /**
+     * The body of {@see dispatch()}, run while holding the dispatch mutex.
+     *
+     * The delivery horizon — the wall-clock moment this run stops reporting
+     * at — is captured ONCE, before the endpoint loop. Re-reading time()
+     * per endpoint would give each caught-up endpoint a slightly different
+     * window end (slow HTTP responses shift it by seconds), producing
+     * distinct summary-cache keys and re-running every aggregate query per
+     * endpoint; with one horizon, caught-up endpoints share identical
+     * windows and one cached summary. Events arriving during the run fall
+     * past the horizon and go out with the next run.
+     *
+     * @param string[] $urls Configured endpoint URLs.
+     * @param string   $lock The held dispatch lock, renewed between windows.
+     * @return void
+     */
+    private static function dispatchLocked(array $urls, string $lock): void
+    {
         self::pruneStaleState($urls);
+
+        $horizon = time();
 
         foreach ($urls as $url) {
             $state = self::getRetryStates()[md5($url)] ?? null;
@@ -220,6 +281,7 @@ final class WebhookDispatcher
                 }
 
                 // Resume the exhausted chain: same frozen bytes, same id.
+                self::renewLock($lock);
                 $delivery = self::deliveryFromState($url, $state);
 
                 if (!self::attemptDelivery($url, $delivery, 'scheduled', 0)) {
@@ -244,15 +306,16 @@ final class WebhookDispatcher
             // (bounded, so one endpoint can never pin the cron
             // indefinitely; the remainder resumes next run).
             for ($round = 0; $round < self::MAX_WINDOWS_PER_RUN; $round++) {
-                $now     = time();
-                $startTs = self::windowStart($url, $now);
+                self::renewLock($lock);
 
-                if ($startTs >= $now) {
+                $startTs = self::windowStart($url, $horizon);
+
+                if ($startTs >= $horizon) {
                     break;
                 }
 
                 $interval = Options::intervalSeconds(Options::webhookInterval());
-                $endTs    = ($now - $startTs > $interval + intdiv($interval, 2)) ? $startTs + $interval : $now;
+                $endTs    = ($horizon - $startTs > $interval + intdiv($interval, 2)) ? $startTs + $interval : $horizon;
                 $delivery = self::freezeDelivery($url, $startTs, $endTs);
 
                 if (!self::attemptDelivery($url, $delivery, 'scheduled', 0)) {
@@ -260,7 +323,7 @@ final class WebhookDispatcher
                     break;
                 }
 
-                if ($delivery['window_end'] >= $now) {
+                if ($delivery['window_end'] >= $horizon) {
                     break; // Caught up — the window was not shrunk.
                 }
             }
@@ -287,18 +350,48 @@ final class WebhookDispatcher
             return;
         }
 
-        $state    = self::getRetryStates()[md5($url)] ?? [];
-        $attempt  = (int) ($state['attempt'] ?? 1);
-        $delivery = self::deliveryFromState($url, $state);
+        // Retries share the dispatch mutex — a retry advancing this
+        // endpoint's marker while a dispatch run reads it would race the
+        // bookkeeping. When a dispatch run holds the lock, re-run this same
+        // attempt shortly instead of consuming it.
+        $lock = self::acquireLock();
+        if ($lock === null) {
+            $when      = time() + MINUTE_IN_SECONDS;
+            $scheduled = wp_schedule_single_event($when, self::RETRY_HOOK, [$url]) !== false;
 
-        if (self::attemptDelivery($url, $delivery, 'retry', $attempt)) {
-            return; // Success already cleared the pending retry state.
+            $states = self::getRetryStates();
+            $key    = md5($url);
+            if (isset($states[$key])) {
+                if ($scheduled) {
+                    $states[$key]['scheduled_for'] = $when;
+                } else {
+                    // Couldn't re-schedule — flip the chain to exhausted so
+                    // the next scheduled dispatch resumes the frozen delivery
+                    // instead of skipping this endpoint forever.
+                    $states[$key]['scheduled_for'] = 0;
+                    $states[$key]['exhausted']     = true;
+                }
+                update_option(self::RETRY_STATE_OPTION, $states, false);
+            }
+            return;
         }
 
-        if ($attempt < count(self::RETRY_DELAYS)) {
-            self::scheduleRetry($url, $attempt + 1, $delivery);
-        } else {
-            self::storeRetryState($url, $attempt, 0, $delivery, true);
+        try {
+            $state    = self::getRetryStates()[md5($url)] ?? [];
+            $attempt  = (int) ($state['attempt'] ?? 1);
+            $delivery = self::deliveryFromState($url, $state);
+
+            if (self::attemptDelivery($url, $delivery, 'retry', $attempt)) {
+                return; // Success already cleared the pending retry state.
+            }
+
+            if ($attempt < count(self::RETRY_DELAYS)) {
+                self::scheduleRetry($url, $attempt + 1, $delivery);
+            } else {
+                self::storeRetryState($url, $attempt, 0, $delivery, true);
+            }
+        } finally {
+            self::releaseLock($lock);
         }
     }
 
@@ -330,8 +423,16 @@ final class WebhookDispatcher
             // chain to keep the id stable across.
             $body['delivery_id'] = md5($url . '|test|' . $now . '|' . wp_rand());
 
-            $encoded = (string) wp_json_encode($body);
-            $result  = self::sendToEndpoint($url, $encoded, $body['delivery_id']);
+            $encoded = wp_json_encode($body);
+
+            // Never POST an empty body when encoding fails (e.g. a filter
+            // introduced an unencodable value) — log the failure instead.
+            if (!is_string($encoded) || $encoded === '') {
+                $encoded = '';
+                $result  = ['ok' => false, 'code' => 0, 'message' => 'Payload could not be JSON-encoded', 'body' => ''];
+            } else {
+                $result = self::sendToEndpoint($url, $encoded, $body['delivery_id']);
+            }
 
             DeliveryLog::log(
                 $url,
@@ -484,11 +585,23 @@ final class WebhookDispatcher
 
         $payload['delivery_id'] = self::deliveryId($url, $startTs, $endTs);
 
+        // wp_json_encode() returns false on failure — casting that to ''
+        // would silently deliver an empty body, and a 2xx from the endpoint
+        // would then advance the marker past a window that was never really
+        // sent. A filter can introduce an unencodable value (a resource, a
+        // recursive structure, invalid UTF-8); when that happens the empty
+        // body below is treated as a FAILED attempt by attemptDelivery() and
+        // enters the normal retry chain. Deliberately NOT rebuilt without
+        // the 'spa_webhook_payload' filter: the filter may exist to redact
+        // sensitive data, and quietly sending the unfiltered payload would
+        // bypass that.
+        $body = wp_json_encode($payload);
+
         return [
             'window_start' => $startTs,
             'window_end'   => $endTs,
             'delivery_id'  => $payload['delivery_id'],
-            'body'         => (string) wp_json_encode($payload),
+            'body'         => is_string($body) ? $body : '',
         ];
     }
 
@@ -536,7 +649,16 @@ final class WebhookDispatcher
      */
     private static function attemptDelivery(string $url, array $delivery, string $kind, int $attempt): bool
     {
-        $result = self::sendToEndpoint($url, $delivery['body'], $delivery['delivery_id']);
+        // An empty body means payload encoding failed (see freezeDelivery()).
+        // Sending it could earn a 2xx from a lenient endpoint and advance the
+        // marker past a window whose data was never delivered — log the
+        // failure instead so the normal retry chain (which rebuilds the
+        // payload from the frozen window) takes over.
+        if ($delivery['body'] === '') {
+            $result = ['ok' => false, 'code' => 0, 'message' => 'Payload could not be JSON-encoded', 'body' => ''];
+        } else {
+            $result = self::sendToEndpoint($url, $delivery['body'], $delivery['delivery_id']);
+        }
 
         DeliveryLog::log(
             $url,
@@ -650,6 +772,181 @@ final class WebhookDispatcher
     }
 
     /**
+     * Acquires the site-wide dispatch mutex without blocking.
+     *
+     * Prefers a MySQL named lock (GET_LOCK) — truly atomic, scoped to this
+     * install (see {@see lockName()}), and released automatically if the PHP
+     * process dies, so a fatal mid-dispatch can never wedge future runs.
+     *
+     * When the server does not support named locks, falls back to an
+     * option-row lock carrying an OWNERSHIP TOKEN and a lease timestamp
+     * ("token|timestamp"). The token is what makes release and steal safe:
+     * release is a compare-and-delete on the holder's own token (see
+     * {@see releaseLock()}), so a run whose lock was stolen after its lease
+     * expired can never delete the new holder's lock — the failure mode
+     * where A's unconditional release freed B's lock and let C run
+     * concurrently with B. Holders renew their lease while working (see
+     * {@see renewLock()}), so a healthy long run is never mistaken for a
+     * dead one; only a lock whose lease is verifiably stale (its process
+     * died without renewing) is stolen, and the steal itself is a
+     * compare-and-delete on the exact stale value, so concurrent stealers
+     * can't double-free.
+     *
+     * All fallback reads/writes go straight to the options table —
+     * WordPress's option caches could serve this process a value another
+     * process changed minutes ago.
+     *
+     * @return string|null 'mysql' or 'option:<token>' (pass to releaseLock()
+     *                     and renewLock()), or null when another process
+     *                     holds the lock.
+     */
+    private static function acquireLock(): ?string
+    {
+        global $wpdb;
+
+        $acquired = $wpdb->get_var($wpdb->prepare('SELECT GET_LOCK(%s, 0)', self::lockName()));
+        if ($acquired !== null) {
+            return ((int) $acquired === 1) ? 'mysql' : null;
+        }
+
+        // Named locks unavailable — token-bearing option-row fallback.
+        $token = md5(wp_generate_uuid4() . wp_rand());
+        $value = $token . '|' . time();
+
+        if (self::insertLockRow($value)) {
+            return 'option:' . $token;
+        }
+
+        // Occupied. Steal only when the lease is verifiably stale, and only
+        // via compare-and-delete on the exact held value, so two stealers
+        // can never both think they freed it.
+        $held = (string) $wpdb->get_var($wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s",
+            self::LOCK_OPTION
+        ));
+
+        $heldTs = (int) substr((string) strrchr($held, '|'), 1);
+        if ($held === '' || time() - $heldTs < self::LOCK_TIMEOUT) {
+            return null;
+        }
+
+        $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s",
+            self::LOCK_OPTION,
+            $held
+        ));
+        wp_cache_delete(self::LOCK_OPTION, 'options');
+
+        return self::insertLockRow($value) ? 'option:' . $token : null;
+    }
+
+    /**
+     * Atomically creates the fallback lock row.
+     *
+     * INSERT IGNORE relies on the options table's unique key on option_name:
+     * exactly one concurrent caller inserts (affected rows = 1); everyone
+     * else is ignored — no read-then-write gap.
+     *
+     * @param string $value Lock value ("token|timestamp").
+     * @return bool True when this call created the row.
+     */
+    private static function insertLockRow(string $value): bool
+    {
+        global $wpdb;
+
+        $inserted = $wpdb->query($wpdb->prepare(
+            "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'off')",
+            self::LOCK_OPTION,
+            $value
+        ));
+        wp_cache_delete(self::LOCK_OPTION, 'options');
+
+        return $inserted === 1;
+    }
+
+    /**
+     * Extends the fallback lock's lease while its holder is still working.
+     *
+     * Called between delivery windows: a multi-endpoint catch-up run can
+     * legitimately exceed {@see LOCK_TIMEOUT} (10 windows × endpoints × a
+     * 15-second HTTP timeout each), and without renewal another process
+     * would mistake the healthy run for a dead one and steal its lock. The
+     * UPDATE matches on the ownership token, so a lock that WAS stolen (this
+     * holder's lease had already lapsed) is left alone — the holder simply
+     * finishes its current window without a lock rather than overwriting the
+     * new holder's row. MySQL named locks need no lease; they die with the
+     * connection.
+     *
+     * @param string $lock The value acquireLock() returned.
+     * @return void
+     */
+    private static function renewLock(string $lock): void
+    {
+        if (!str_starts_with($lock, 'option:')) {
+            return;
+        }
+
+        global $wpdb;
+
+        $token = substr($lock, strlen('option:'));
+
+        $wpdb->query($wpdb->prepare(
+            "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value LIKE %s",
+            $token . '|' . time(),
+            self::LOCK_OPTION,
+            $wpdb->esc_like($token) . '|%'
+        ));
+        wp_cache_delete(self::LOCK_OPTION, 'options');
+    }
+
+    /**
+     * Releases the dispatch mutex acquired by {@see acquireLock()}.
+     *
+     * The fallback release is a compare-and-delete on the ownership token:
+     * if this run's lease lapsed and another process stole the lock, the
+     * DELETE matches nothing and the new holder keeps its mutex.
+     *
+     * @param string $lock The value acquireLock() returned ('mysql' or 'option:<token>').
+     * @return void
+     */
+    private static function releaseLock(string $lock): void
+    {
+        global $wpdb;
+
+        if ($lock === 'mysql') {
+            $wpdb->query($wpdb->prepare('SELECT RELEASE_LOCK(%s)', self::lockName()));
+            return;
+        }
+
+        $token = substr($lock, strlen('option:'));
+
+        $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value LIKE %s",
+            self::LOCK_OPTION,
+            $wpdb->esc_like($token) . '|%'
+        ));
+        wp_cache_delete(self::LOCK_OPTION, 'options');
+    }
+
+    /**
+     * The MySQL named-lock name. Named locks are SERVER-wide, not
+     * per-database — two unrelated WordPress installs both using the default
+     * wp_ prefix on one database server would contend on a prefix-only name —
+     * so the name hashes the database name, table prefix, and site URL
+     * together to make it unique per install.
+     *
+     * @return string 45 characters, well under MySQL's 64-character limit.
+     */
+    private static function lockName(): string
+    {
+        global $wpdb;
+
+        $db = defined('DB_NAME') ? DB_NAME : '';
+
+        return 'spa_dispatch_' . md5($db . '|' . $wpdb->prefix . '|' . home_url());
+    }
+
+    /**
      * Returns the stored retry state map (md5(url) → state).
      *
      * @return array<string, array<string, mixed>>
@@ -733,7 +1030,7 @@ final class WebhookDispatcher
                 'start' => gmdate('c', $startTs),
                 'end'   => gmdate('c', $endTs),
             ],
-            'analytics'      => Reports::buildSummary($start, $end, self::reportRowLimit()),
+            'analytics'      => self::summaryFor($start, $end),
         ];
 
         /**
@@ -744,6 +1041,41 @@ final class WebhookDispatcher
          * @param int                  $endTs   Window end (unix timestamp).
          */
         return (array) apply_filters('spa_webhook_payload', $payload, $startTs, $endTs);
+    }
+
+    /** @var array<string, array<string, mixed>> Per-request memo of window summaries (see summaryFor()). */
+    private static array $summaryCache = [];
+
+    /**
+     * The analytics summary for one window, memoized for this request.
+     *
+     * A dispatch run freezes one delivery per endpoint, and endpoints that
+     * are caught up share identical windows — recomputing the ~17 aggregate
+     * queries behind {@see Reports::buildSummary()} once per endpoint made
+     * multi-endpoint runs needlessly heavy and long (which in turn raised
+     * the odds of overlapping cron executions). The memo lives only for this
+     * PHP request, so it can never serve stale data across runs.
+     *
+     * @param string $start UTC datetime (inclusive).
+     * @param string $end   UTC datetime (exclusive).
+     * @return array<string, mixed>
+     */
+    private static function summaryFor(string $start, string $end): array
+    {
+        $limit = self::reportRowLimit();
+        $key   = $start . '|' . $end . '|' . $limit;
+
+        if (!isset(self::$summaryCache[$key])) {
+            // A backfill catch-up can touch many distinct windows; keep the
+            // memo small — it only needs to span one round of endpoints.
+            if (count(self::$summaryCache) >= 12) {
+                self::$summaryCache = [];
+            }
+
+            self::$summaryCache[$key] = Reports::buildSummary($start, $end, $limit);
+        }
+
+        return self::$summaryCache[$key];
     }
 
     /**

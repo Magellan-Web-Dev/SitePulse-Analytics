@@ -567,11 +567,18 @@ final class Reports
 
     /**
      * Most common landing pages within a range — the first pageview of each
-     * session that started in the window.
+     * session that TRULY started in the window.
      *
      * The inner derived table finds each session's first pageview by MIN(id)
-     * over the (indexed) window, so the query stays a single bounded pass
-     * plus primary-key lookups — no per-session queries.
+     * over every pageview up to the window's end (bounded overall by the
+     * retention window), then keeps only sessions whose first pageview falls
+     * inside the requested range. Bounding the inner scan to the window
+     * itself would be cheaper but wrong: a session that began before the
+     * window would be assigned a fresh "landing page" at its first in-window
+     * pageview, inflating the report with mid-session pages. The scan is
+     * served by the type_session_date (event_type, session_id, created_at)
+     * index — a covering, pre-grouped read (InnoDB secondary indexes carry
+     * the PK, so MIN(id) needs no row lookups).
      *
      * @param string $start UTC datetime (inclusive).
      * @param string $end   UTC datetime (exclusive).
@@ -590,15 +597,16 @@ final class Reports
                      SELECT MIN(id) AS first_id
                      FROM {$table}
                      WHERE event_type = 'pageview' AND session_id <> ''
-                       AND created_at >= %s AND created_at < %s
+                       AND created_at < %s
                      GROUP BY session_id
+                     HAVING MIN(created_at) >= %s
                  ) AS f
                  INNER JOIN {$table} AS e ON e.id = f.first_id
                  GROUP BY e.page_url
                  ORDER BY sessions DESC
                  LIMIT %d",
-                $start,
                 $end,
+                $start,
                 $limit
             ),
             ARRAY_A

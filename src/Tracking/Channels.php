@@ -109,13 +109,17 @@ final class Channels
      * conventions, then — for untagged traffic — the referrer, falling back
      * to the session's entrance referrer (session_referrer, persisted by the
      * tracker) when the event's own referrer is internal or missing. Untagged
-     * pageviews with an internal referrer and no session referrer return ''
+     * events with an internal referrer and no session referrer return ''
      * (mid-session navigation, not an entrance); a conversion in the same
      * situation falls back to Direct so every conversion carries a channel.
      *
+     * Applied to every attributed event type at ingestion — pageviews and
+     * conversions, but also clicks, form attempts, hovers, and scroll
+     * milestones — so intermediate funnel steps can be segmented by channel.
+     *
      * @param array<string, string> $row  Sanitized event row (utm_*, click_id_type, referrer, session_referrer).
-     * @param string                $type Event type ('pageview' or 'form_success').
-     * @return string Channel label, or '' for mid-session pageviews.
+     * @param string                $type Event type (e.g. 'pageview', 'click', 'form_success').
+     * @return string Channel label, or '' for unattributable mid-session events.
      */
     public static function classify(array $row, string $type): string
     {

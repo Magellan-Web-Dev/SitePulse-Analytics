@@ -4,13 +4,18 @@
  * Dependency-free visitor interaction tracker. Reads its configuration from
  * window.SitePulseConfig (printed by ScriptLoader immediately before this
  * script), batches events in memory, and delivers them to the plugin's REST
- * endpoint via fetch (or navigator.sendBeacon on page exit). Batches that
- * fail with a network error or a 5xx response are kept in a bounded
- * sessionStorage map keyed by batch id and resent on later flushes — by the
- * same page or, after a navigation destroys it, the next page in this tab.
- * Each batch is removed only when its own resend is acknowledged, so one
- * batch's success can never discard another's undelivered events
- * (at-least-once: a rare duplicate is possible if a response was lost).
+ * endpoint via fetch (or navigator.sendBeacon on page exit). Every batch is
+ * PERSISTED to a bounded sessionStorage map (keyed by batch id) before it is
+ * sent, and removed only when the server acknowledges it (2xx, or a 4xx that
+ * retrying cannot fix) — so a page destroyed before the response arrives
+ * leaves the batch behind for the next page in this tab to resend. One
+ * batch's success can never discard another's undelivered events.
+ * Fetch-delivered batches are therefore at-least-once (a rare duplicate is
+ * possible if a response was lost). Page-exit batches handed to
+ * navigator.sendBeacon are the exception: an accepted hand-off only means
+ * the browser queued the request, so those are treated as delivered
+ * (best-effort) — keeping them persisted would resend every exit batch on
+ * the next page and systematically double-count instead.
  *
  * Tracked interactions (each individually toggleable in plugin settings):
  *  - pageview     : one event per page load
@@ -286,30 +291,56 @@
         return out;
     }
 
-    /** Memoized acquisition record, refreshed only when the session rotates —
-     *  a snapshot is attached to every event, and re-reading storage per
-     *  hover/scroll event would be wasted work. */
-    var acquisitionCache = { id: null, record: { c: {}, r: '' } };
+    /** This page load's applied acquisition — sessionAcquisition() is run
+     *  once per session id so the landing URL's tags (or entrance referrer)
+     *  are written into the session exactly once, then kept as a fallback
+     *  for when storage becomes unreadable mid-page. */
+    var appliedAcquisition = { id: null, record: { c: {}, r: '' } };
+
+    /**
+     * The session's current acquisition record. The first event for a given
+     * session id applies this page load's landing attribution via
+     * sessionAcquisition(); later events RE-READ the stored record instead
+     * of trusting a memo — another tab sharing the localStorage session may
+     * have re-attributed it (last touch) in the meantime, and a stale memo
+     * would keep crediting the old campaign from this tab.
+     */
+    function currentAcquisition(id) {
+        if (appliedAcquisition.id !== id) {
+            appliedAcquisition = { id: id, record: sessionAcquisition(id) };
+            return appliedAcquisition.record;
+        }
+
+        var stored = null;
+        if (sessionStore) {
+            try {
+                stored = JSON.parse(sessionStore.getItem('spa_campaign'));
+            } catch (e) {
+                stored = null;
+            }
+        }
+        if (stored && stored.id === id && typeof stored.c === 'object' && stored.c) {
+            return stored;
+        }
+        return appliedAcquisition.record;
+    }
 
     /** A fresh copy of the session's current attribution (campaign fields
      *  plus session_referrer), safe to attach to an event (track() adds page
      *  context to the object it is given, so the stored record itself must
      *  never be passed in). */
     function campaignSnapshot() {
-        var id = sessionId();
-        if (acquisitionCache.id !== id) {
-            acquisitionCache = { id: id, record: sessionAcquisition(id) };
-        }
+        var record = currentAcquisition(sessionId());
 
-        var campaign = acquisitionCache.record.c || {};
+        var campaign = record.c || {};
         var out = {};
         for (var i = 0; i < CAMPAIGN_KEYS.length; i++) {
             if (campaign[CAMPAIGN_KEYS[i]]) {
                 out[CAMPAIGN_KEYS[i]] = campaign[CAMPAIGN_KEYS[i]];
             }
         }
-        if (acquisitionCache.record.r) {
-            out.session_referrer = acquisitionCache.record.r;
+        if (record.r) {
+            out.session_referrer = String(record.r);
         }
         return out;
     }
@@ -391,12 +422,14 @@
         }
     }
 
-    /* Failed batches persist in a sessionStorage MAP keyed by batch id, so
-     * they survive the page being destroyed before a retry lands. Each entry
-     * is removed only when ITS OWN resend is acknowledged — a single shared
-     * stash cleared on any success would let batch B's success discard batch
-     * A's still-undelivered events when two sends overlap. Total stashed
-     * events are bounded by MAX_QUEUE (oldest batches dropped first). */
+    /* Batches persist in a sessionStorage MAP keyed by batch id BEFORE they
+     * are sent, so they survive the page being destroyed before the server's
+     * response ever arrives (persist-first, remove-on-acknowledgment). Each
+     * entry is removed only when ITS OWN send is acknowledged — a single
+     * shared stash cleared on any success would let batch B's success
+     * discard batch A's still-undelivered events when two sends overlap.
+     * Total stashed events are bounded by MAX_QUEUE (oldest batches dropped
+     * first). */
 
     /** @returns {Object<string, Array>} The pending-batch map ({} when unreadable). */
     function readPendingMap() {
@@ -453,16 +486,24 @@
     var inFlight = {};
 
     /**
-     * Sends one batch under its id. On page exit sendBeacon is preferred
-     * because it survives unload (an accepted hand-off counts as delivered);
-     * otherwise a keepalive fetch runs. A network error or 5xx stashes the
-     * batch under its id for later resend; 2xx — and 4xx, which retrying
-     * cannot fix — remove it.
+     * Sends one batch under its id, persisting it BEFORE the attempt so a
+     * page destroyed mid-flight can never lose it. The persisted entry is
+     * removed only on acknowledgment: a 2xx response, or a 4xx that retrying
+     * cannot fix. A network error or 5xx leaves it persisted for a later
+     * flush (this page or the next one in this tab) to resend.
+     *
+     * On page exit sendBeacon is preferred because it survives unload;
+     * otherwise a keepalive fetch runs. An accepted beacon hand-off is
+     * treated as delivered even though the browser has only queued it —
+     * beacon delivery is best-effort by nature, and keeping the entry
+     * persisted would resend every exit batch on the next page and
+     * systematically double-count.
      */
     function sendBatch(id, events, exiting) {
         var body = JSON.stringify({ events: events });
 
         inFlight[id] = true;
+        stashBatch(id, events);
 
         if (exiting && navigator.sendBeacon) {
             var accepted = false;
@@ -490,19 +531,15 @@
                 credentials: 'omit',
                 keepalive: true
             }).then(function (response) {
-                if (!response.ok && response.status >= 500) {
-                    stashBatch(id, events);
-                } else {
-                    unstashBatch(id);
+                if (response.ok || (response.status >= 400 && response.status < 500)) {
+                    unstashBatch(id); // Acknowledged, or unfixable by retry.
                 }
                 delete inFlight[id];
             }).catch(function () {
-                stashBatch(id, events);
-                delete inFlight[id];
+                delete inFlight[id]; // Network error — stays persisted.
             });
         } catch (e) {
-            stashBatch(id, events);
-            delete inFlight[id];
+            delete inFlight[id]; // fetch unavailable/threw — stays persisted.
         }
     }
 
