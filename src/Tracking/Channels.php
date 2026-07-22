@@ -147,7 +147,12 @@ final class Channels
         $source  = strtolower((string) ($row['utm_source'] ?? ''));
         $medium  = strtolower((string) ($row['utm_medium'] ?? ''));
         $clickId = (string) ($row['click_id_type'] ?? '');
-        $tagged  = $source !== '' || $medium !== '' || (string) ($row['utm_campaign'] ?? '') !== '';
+        $tagged  = $source !== ''
+            || $medium !== ''
+            || (string) ($row['utm_campaign'] ?? '') !== ''
+            || (string) ($row['utm_id'] ?? '') !== ''
+            || (string) ($row['utm_term'] ?? '') !== ''
+            || (string) ($row['utm_content'] ?? '') !== '';
 
         if (in_array($clickId, self::PAID_SEARCH_CLICK_IDS, true)) {
             return 'Paid Search';
@@ -207,7 +212,7 @@ final class Channels
             return self::hostChannel($sessionHost);
         }
 
-        if ($host === '') {
+        if ($host === '' || !empty($row['session_direct'])) {
             return 'Direct';
         }
 

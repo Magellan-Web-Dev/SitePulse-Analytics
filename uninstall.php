@@ -41,6 +41,12 @@ function spa_uninstall_current_site(): void
     delete_option('spa_webhook_dispatch_lock');
     delete_option('spa_webhook_log');
 
+    // Cleanup mutex (see DatabaseManager::acquireCleanupLock()). Unlike at
+    // deactivation, uninstall runs strictly after deactivation has already
+    // completed — no plugin code can still be running — so there is no
+    // in-progress holder left to disturb by deleting it outright here.
+    delete_option('spa_cleanup_lock');
+
     // Rate-limit counter rows, written directly to the options table by the
     // REST controller when no persistent object cache is available.
     $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE 'spa\\_rl\\_%'");
@@ -50,6 +56,7 @@ function spa_uninstall_current_site(): void
 
     // Scheduled cron events, including any pending single-event delivery retries.
     wp_clear_scheduled_hook('spa_cleanup_old_events');
+    wp_clear_scheduled_hook('spa_cleanup_old_events_catchup');
     wp_clear_scheduled_hook('spa_dispatch_webhooks');
     wp_unschedule_hook('spa_retry_webhook');
 }

@@ -2,7 +2,7 @@
 /**
  * Plugin Name: SitePulse Analytics
  * Description: Tracks page views, link and button clicks, form submissions, hover activity, scroll depth, and other visitor interactions. Analytics are displayed in the WordPress dashboard and can be sent on a schedule as JSON to one or more webhook endpoints.
- * Version:     1.7.0
+ * Version:     1.8.0
  * Requires at least: 6.3
  * Requires PHP: 8.1
  * Author:      Chris Paschall
@@ -39,7 +39,7 @@ if (version_compare(PHP_VERSION, '8.1', '<')) {
  */
 } else {
 
-    define('SPA_VERSION', '1.7.0');
+    define('SPA_VERSION', '1.8.0');
     define('SPA_PLUGIN_FILE', __FILE__);
     define('SPA_PLUGIN_DIR', plugin_dir_path(__FILE__));
     define('SPA_PLUGIN_URL', plugin_dir_url(__FILE__));
@@ -78,9 +78,18 @@ if (version_compare(PHP_VERSION, '8.1', '<')) {
      * so analytics survive a deactivate/reactivate cycle. Data is only removed
      * when rows age past the configured retention window or when the plugin is
      * uninstalled (see uninstall.php).
+     *
+     * Deliberately does NOT touch the cleanup lock option: it is
+     * self-managing (released by whichever process holds it when its work
+     * finishes, or reclaimed via its own stale-lease compare-and-delete path
+     * if that process died), and deactivation has no way to know whether a
+     * lock it finds set is still legitimately held by an in-progress run —
+     * unconditionally deleting it here could free a lock a different,
+     * still-running process actually owns.
      */
     register_deactivation_hook(__FILE__, static function (): void {
         wp_clear_scheduled_hook('spa_cleanup_old_events');
+        wp_clear_scheduled_hook(SitePulseAnalytics\Database\DatabaseManager::CLEANUP_CATCHUP_HOOK);
         wp_clear_scheduled_hook(SitePulseAnalytics\Webhook\WebhookDispatcher::CRON_HOOK);
         SitePulseAnalytics\Webhook\WebhookDispatcher::suspendAllRetries();
     });

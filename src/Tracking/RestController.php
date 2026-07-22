@@ -153,7 +153,11 @@ final class RestController
         $events = array_slice($events, 0, self::MAX_EVENTS_PER_REQUEST);
 
         if (!self::chargeRateLimit(count($events))) {
-            return new \WP_REST_Response(['error' => 'rate_limited'], 429);
+            // The tracker paces its own retries client-side, but there's no
+            // reason not to tell it how long to wait rather than leaving it
+            // to guess — this is the one piece of that pacing only the
+            // server can actually know.
+            return new \WP_REST_Response(['error' => 'rate_limited'], 429, ['Retry-After' => '60']);
         }
 
         // The tracker's batch id makes replayed batches idempotent (see the
@@ -267,12 +271,18 @@ final class RestController
         // sent or stored. session_referrer is the referrer the session
         // ENTERED through (persisted by the tracker); it is used to classify
         // the channel at ingestion and is not stored as its own column.
+        // session_direct is the companion signal for a session that entered
+        // with no referrer at all — an explicit marker rather than an absent
+        // session_referrer, so classification can tell "verified Direct"
+        // apart from "no signal sent" (an old cached tracker, a hand-crafted
+        // request); also not stored as its own column.
         if (in_array($type, self::ATTRIBUTED_TYPES, true)) {
             foreach (self::CAMPAIGN_PARAMS as $param) {
                 $data[$param] = self::campaignValue(self::scalarString($event[$param] ?? ''));
             }
             $data['click_id_type']    = sanitize_key(self::scalarString($event['click_id_type'] ?? ''));
             $data['session_referrer'] = self::normalizeReferrer(self::scalarString($event['session_referrer'] ?? ''));
+            $data['session_direct']  = self::scalarString($event['session_direct'] ?? '') === '1';
         }
 
         return ['type' => $type, 'data' => $data];

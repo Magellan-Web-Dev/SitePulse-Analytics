@@ -2,7 +2,7 @@
 
 A self-hosted visitor analytics plugin for WordPress. SitePulse tracks page views, link and button clicks, form submissions, **confirmed form conversions with campaign attribution**, mouse hover activity, and scroll depth, then surfaces everything inside the WordPress dashboard — making it easy to identify popular pages, which campaigns and channels actually produce leads, and the areas of your content visitors engage with. On a configurable schedule, aggregated analytics (including individual attributed conversions) can also be delivered as JSON `POST` requests to one or more webhook endpoints.
 
-- **Version:** 1.7.0
+- **Version:** 1.8.0
 - **Requires WordPress:** 6.3+
 - **Requires PHP:** 8.1+
 - **License:** GPL-2.0-or-later
@@ -16,8 +16,8 @@ A self-hosted visitor analytics plugin for WordPress. SitePulse tracks page view
 - **Confirmed conversions** — a separate `form_success` event fires only when the form plugin reports that the server accepted the submission: Elementor Pro's `submit_success`, Contact Form 7's `wpcf7mailsent`, WPForms' `wpformsAjaxSubmitSuccess`, and Gravity Forms' `gform_confirmation_loaded`, plus a `spa:conversion` DOM event for custom goals. **These integrations detect AJAX submissions** — the events above fire on the AJAX success response. A traditional (non-AJAX) submission that navigates to a new page has no success event the tracker can observe, so forms configured that way are counted as attempts but not as confirmed conversions; use the `spa:conversion` event (e.g. on a thank-you page) for those. Every conversion carries a unique conversion id (duplicates from retried deliveries are never double-counted — the REST endpoint rejects a `form_success` without a valid, bounded id) and a **snapshot of the session's campaign attribution at conversion time**, so each conversion record is self-contained — even when the tagged landing happened earlier in the session or the campaign data has since aged out.
 - **Campaign attribution** — all six utm parameters (`utm_source`, `utm_medium`, `utm_campaign`, `utm_id`, `utm_term`, `utm_content`) are captured from tagged landing URLs, and ad-click identifiers (`gclid`, `gbraid`, `wbraid`, `fbclid`, `msclkid`, `ttclid`, `twclid`, `li_fat_id`) are recognized: only the parameter *name* is stored (never the value), and when no utm tags are present the implied source/medium is filled in (e.g. `gclid` → `google` / `cpc`). Attribution is last-touch within the session, and the snapshot rides on **every** event in the session — pageviews and conversions, but also clicks, form attempts, hovers, and scroll milestones — so intermediate funnel steps can be segmented by campaign. Untagged acquisition persists too: the referrer a session *entered* through is stored client-side and sent as `session_referrer`, so an organic or referral visit keeps its channel across internal navigation instead of degrading to Direct at conversion time.
 - **Channel grouping** — every attributed event is classified into a marketing channel at ingestion (Paid Search, Paid Social, Organic Search, Organic Social, Email, Display, Affiliate, SMS, Referral, Direct, Other), with source aliases normalized (`fb` / `facebook.com` → `facebook`) so reports don't fragment. When an event's own referrer is internal or missing, classification falls back to the session's persisted entrance referrer (`session_referrer`). Referrer hosts match a search engine or social network only in the registrable-domain position (`www.google.co.uk` matches; a lookalike like `google.example.test` does not). Both the alias map and the channel rules are filterable.
-- **Hover tracking** — records when a visitor's pointer rests on an interactive element or image for a configurable dwell time (default 800 ms), once per element per page view. Add `data-spa-hover` to any element to opt it into hover tracking.
-- **Scroll depth** — 25/50/75/100% milestones, once each per page view.
+- **Hover tracking** — records when a visitor's pointer rests on an interactive element for a configurable dwell time (default 800 ms), once per element per page view. Add `data-spa-hover` to any element — images included — to opt it into hover tracking.
+- **Scroll depth** — 50/100% milestones, once each per page view.
 - **Custom server-side events** — record anything else with `spa_track_event()`.
 - **Dashboard analytics** — summary cards, an accessible daily page-view chart (single-Tab-stop keyboard navigation, touch/mouse tooltips, visible axes, and a data-table fallback), a print-optimized **Print / Save as PDF** report view, top pages, top landing pages, top clicked elements, top forms, most-hovered elements, top referrers, campaign performance (sessions, conversions, session conversion rate), a keyword/creative drilldown (`utm_term` / `utm_content`), a channel breakdown, a device breakdown, and a recent-activity feed. Reports are grouped into an always-visible Overview plus collapsible Content, Engagement, Acquisition, Devices, and Recent Activity sections, filterable by 7/30/90-day periods (calendar days, UTC, with the exact date range shown).
 - **Webhook delivery** — aggregated analytics sent as JSON to **any number of endpoints** (HTTPS required; a filter allows HTTP for development) on an hourly, twice-daily, daily, or weekly schedule, with per-endpoint delivery windows, optional **HMAC-signed requests** (shared or **per-endpoint** signing secrets), optional **history backfill** for newly added endpoints, automatic retries on failure, a manual test-send button, and a delivery log. Conversion delivery is **lossless**: windows holding more than 100 individual conversions are split into consecutive deliveries instead of dropping the overflow.
@@ -110,7 +110,7 @@ Example payload:
 ```json
 {
     "source": "sitepulse-analytics",
-    "plugin_version": "1.7.0",
+    "plugin_version": "1.8.0",
     "website_info": {
         "name": "Example Site",
         "url": "https://example.com",
@@ -142,8 +142,8 @@ Example payload:
         ],
         "top_campaign_content": [
             {
-                "utm_source": "google", "utm_campaign": "summer-sale",
-                "utm_term": "emergency plumber", "utm_content": "ad-variant-b",
+                "utm_source": "google", "utm_medium": "cpc", "utm_campaign": "summer-sale",
+                "utm_id": "cmp-3301", "utm_term": "emergency plumber", "utm_content": "ad-variant-b",
                 "views": 42, "sessions": 31, "conversions": 3
             }
         ],
@@ -290,6 +290,24 @@ sitepulse-analytics/
 The plugin checks the [GitHub repository's](https://github.com/Magellan-Web-Dev/SitePulse-Analytics) latest release every 12 hours through WordPress's normal update pipeline. Publishing a release with a tag like `v1.1.0` makes the update banner appear on the Plugins screen; a **Check for updates** row action forces an immediate check. After an update installs, the plugin folder is automatically normalized back to `sitepulse-analytics/` before WordPress reactivates it.
 
 ## Changelog
+
+### 1.8.0
+
+Correctness, reporting-accuracy, and reliability fixes following a further external code review. The webhook JSON payload format/schema is unchanged except one approved additive change: `utm_medium` and `utm_id` are now included in `analytics.top_campaign_content[]`.
+
+- **Campaign Terms & Content gains utm_medium/utm_id:** both the dashboard table and the webhook's `top_campaign_content[]` entries now include these two fields alongside the existing four, so a keyword/creative combination sharing everything but medium or campaign ID no longer merges into one row.
+- **Conversion-only campaigns no longer invisible:** the Campaigns report (dashboard and webhook) now surfaces a campaign that converted in-window but has no matching pageview in that same window — previously it was silently dropped from the list entirely, with no indication it existed. Ranking ties (equal view counts) now break deterministically.
+- **Webhook totals.form_success now matches the dashboard:** both now report the same deduplicated-by-conversion-id count; the webhook payload previously used a raw, potentially at-least-once-inflated row count that the dashboard had already independently corrected.
+- **Mid-session Direct attribution fixed:** the second and later pageviews, clicks, hovers, and scroll events in an untagged session that landed with no referrer now correctly classify as "Direct" — previously only that session's very first pageview did, and everything after it fell through with a blank channel, excluded from every report.
+- **Channel classification recognizes utm_id/utm_term/utm_content-only tags:** a visit tagged only through one of these three fields (no source/medium/campaign) is now classified the same way the Campaigns report already treats it, instead of falling through to referrer/Direct logic.
+- **Retention-vs-period mismatch now fully consistent:** selecting a longer period (e.g. 90 days) than the configured retention window (e.g. 14 days) now clamps the actual query — not just the displayed label — so the chart, totals, printed report, and a new on-screen warning notice all agree on the shorter window actually queried. The chart layout also now scales correctly to any retention-clamped period, not just the 7/30/90-day presets.
+- **Scroll depth milestones reduced to 50%/100%:** replacing 25/50/75/100%, which recorded four rows (plus the pageview) for a single, non-interactive short page. A fast scroll straight to the bottom of a long page still correctly records both 50% and 100%, matching what a slower scroll would record.
+- **Hover tracking's default selector no longer includes images:** interactive elements (links, buttons, form fields) remain tracked by default; add `data-spa-hover` to an image (or any other element) to opt it back in.
+- **"Top Referrers" column relabeled "Pageviews"** for accuracy — no calculation change.
+- **Tracker retry/backoff survives page navigation:** a `429` response or repeated failure now pauses retries tab-wide — persisted in `sessionStorage` (with an in-memory fallback), honoring a server-sent `Retry-After` header when present — and that pause is respected by every queued batch, not just the one that originally failed. Previously this state lived only in memory and was lost on every page load, so a multi-page visit during an outage never actually backed off.
+- **jQuery form-success binding gets one more attempt**, from the native submit listener, catching a script optimizer that defers loading jQuery past the tracker's existing five binding attempts.
+- **Fail-closed report queries:** a database error while building a report now shows an inline error notice on the affected dashboard section instead of silently rendering zeros indistinguishable from a real absence of data; a webhook delivery affected the same way is treated as a failed attempt and enters the normal retry chain, rather than risking an incomplete payload being sent.
+- **Retention cleanup can now catch up on a backlog:** if a day's deletion budget isn't enough to clear every row past the retention cutoff, a bounded catch-up run continues the work roughly every 20 minutes (instead of waiting for the next daily run) under a proper mutex; the rate-limit-counter purge is now also chunked and time-bounded instead of one unbounded `DELETE`.
 
 ### 1.7.0
 

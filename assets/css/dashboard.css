@@ -154,19 +154,17 @@
     gap: 8px;
 }
 
-/* Keep 30/90-day bars usable: every day keeps at least a 14px interaction
-   width and the wrapper above scrolls horizontally instead of squeezing 90
-   targets into the visible viewport. */
-.spa-dash .spa-chart-layout--30 {
-    min-width: 640px;
+/* Keep wide charts usable: every day keeps at least a 14px interaction width
+   and the wrapper above scrolls horizontally instead of squeezing many
+   targets into the visible viewport. A density bucket (rather than a class
+   per exact day count) scales to any effective day count a site's retention
+   setting can clamp the selected period down to, not just 7/30/90 — the
+   PHP side supplies --spa-chart-min-width; this is just the floor/fallback. */
+.spa-dash .spa-chart-layout--wide {
+    min-width: var(--spa-chart-min-width, 640px);
 }
 
-.spa-dash .spa-chart-layout--90 {
-    min-width: 1400px;
-}
-
-.spa-dash .spa-chart-layout--30 .spa-chart-col,
-.spa-dash .spa-chart-layout--90 .spa-chart-col {
+.spa-dash .spa-chart-layout--wide .spa-chart-col {
     min-width: 14px;
 }
 

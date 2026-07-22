@@ -412,7 +412,7 @@ final class SettingsPage
             'form_submit'  => 'Form submissions (attempts)',
             'form_success' => 'Confirmed form conversions (Elementor Pro, Contact Form 7, WPForms, Gravity Forms)',
             'hover'        => 'Mouse hover activity',
-            'scroll_depth' => 'Scroll depth milestones (25/50/75/100%)',
+            'scroll_depth' => 'Scroll depth milestones (50/100%)',
         ];
 
         echo '<h2>Tracking</h2>';

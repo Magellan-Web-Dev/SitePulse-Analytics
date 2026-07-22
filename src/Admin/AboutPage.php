@@ -147,11 +147,11 @@ final class AboutPage
             ],
             [
                 'title' => 'Hover Activity',
-                'text'  => 'Records when a visitor\'s pointer rests on an interactive element or image for a configurable dwell time, once per element per page view. Add data-spa-hover to any element to opt it in.',
+                'text'  => 'Records when a visitor\'s pointer rests on an interactive element for a configurable dwell time, once per element per page view. Add data-spa-hover to any element — images included — to opt it in.',
             ],
             [
                 'title' => 'Scroll Depth',
-                'text'  => 'Reaching 25%, 50%, 75%, and 100% of the page fires a milestone once each per page view, showing how far visitors actually read.',
+                'text'  => 'Reaching 50% and 100% of the page fires a milestone once each per page view, showing how far visitors actually read.',
             ],
             [
                 'title' => 'Custom Events',
@@ -395,7 +395,7 @@ final class AboutPage
         echo '<pre class="spa-about-code">' . esc_html(
             (string) wp_json_encode([
                 'source'         => 'sitepulse-analytics',
-                'plugin_version' => defined('SPA_VERSION') ? SPA_VERSION : '1.7.0',
+                'plugin_version' => defined('SPA_VERSION') ? SPA_VERSION : '1.8.0',
                 'website_info'   => [
                     'name'   => get_bloginfo('name'),
                     'url'    => home_url(),
@@ -424,8 +424,8 @@ final class AboutPage
                         'conversions' => 7, 'converting_sessions' => 6, 'conversion_rate' => 8.11,
                     ]],
                     'top_campaign_content' => [[
-                        'utm_source' => 'google', 'utm_campaign' => 'summer-sale',
-                        'utm_term' => 'emergency plumber', 'utm_content' => 'ad-variant-b',
+                        'utm_source' => 'google', 'utm_medium' => 'cpc', 'utm_campaign' => 'summer-sale',
+                        'utm_id' => 'cmp-3301', 'utm_term' => 'emergency plumber', 'utm_content' => 'ad-variant-b',
                         'views' => 42, 'sessions' => 31, 'conversions' => 3,
                     ]],
                     'channels'        => [['channel' => 'Email', 'views' => 96, 'sessions' => 74, 'conversions' => 7, 'converting_sessions' => 6, 'conversion_rate' => 8.11]],

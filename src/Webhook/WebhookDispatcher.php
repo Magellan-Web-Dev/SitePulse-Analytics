@@ -5,6 +5,7 @@ namespace SitePulseAnalytics\Webhook;
 
 if (!defined('ABSPATH')) exit;
 
+use SitePulseAnalytics\Database\ReportQueryException;
 use SitePulseAnalytics\Database\Reports;
 use SitePulseAnalytics\Settings\Options;
 
@@ -101,6 +102,30 @@ final class WebhookDispatcher
 
     /** @var string Option key for the fallback dispatch mutex (when GET_LOCK is unavailable). */
     private const LOCK_OPTION = 'spa_webhook_dispatch_lock';
+
+    /**
+     * Transient key throttling repeated "report query failed" error_log()
+     * calls. A sustained database outage would otherwise have every cron
+     * tick (and every dashboard load) write the same diagnostic; this bounds
+     * that to once per cooldown, mirroring RestController's existing
+     * RATE_LIMITED_FLAG pattern for the same "don't flood on every request"
+     * reason.
+     *
+     * @var string
+     */
+    private const REPORT_FAILURE_LOG_FLAG = 'spa_report_query_failure_logged';
+
+    /**
+     * Sanitized message used for both the Delivery Log and (for sendTest())
+     * a failed test entry when a report query fails. Never the raw
+     * $wpdb->last_error text — that can incidentally include table/column
+     * names or query fragments not meant for an admin-facing or
+     * receiver-adjacent surface; the raw message goes only to error_log()
+     * (see {@see logReportQueryFailure()}).
+     *
+     * @var string
+     */
+    private const REPORT_FAILURE_MESSAGE = 'Report data could not be generated (database error)';
 
     /**
      * Seconds after which a fallback option lock's LEASE is considered stale
@@ -452,8 +477,21 @@ final class WebhookDispatcher
             return;
         }
 
-        $now     = time();
-        $payload = self::buildPayload($now - 7 * DAY_IN_SECONDS, $now);
+        $now = time();
+
+        try {
+            $payload = self::buildPayload($now - 7 * DAY_IN_SECONDS, $now);
+        } catch (ReportQueryException $e) {
+            self::logReportQueryFailure($e);
+
+            foreach ($urls as $url) {
+                $deliveryId = md5($url . '|test|' . $now . '|' . wp_rand());
+
+                DeliveryLog::log($url, false, 0, self::REPORT_FAILURE_MESSAGE, 'test', 0, $deliveryId, '', '');
+            }
+
+            return;
+        }
 
         $payload['test'] = true;
 
@@ -664,43 +702,93 @@ final class WebhookDispatcher
      * forever. A shrunk window's overflow becomes the next delivery's window
      * (see the catch-up loop in {@see dispatch()}).
      *
+     * If any underlying report query fails — {@see Reports::conversionWindowEnd()}
+     * runs first, before $endTs is even reshaped, and every query behind
+     * {@see Reports::buildSummary()} runs after — the whole method body is
+     * covered by one try/catch. Which $endTs value the caught branch returns
+     * depends on where the failure happened, and needs no special-casing:
+     * $endTs is only ever reassigned (from the original parameter to the
+     * boundary-shrunk value) after conversionWindowEnd() SUCCEEDS, so a
+     * failure there leaves $endTs at the original, un-shrunk parameter (the
+     * only valid choice — no boundary was ever computed), while a failure in
+     * a later call (inside buildPayload()) leaves $endTs already reassigned
+     * to the correctly-shrunk boundary. Reverting to the original window on a
+     * later failure would let a resumed delivery cover more conversions than
+     * MAX_CONVERSIONS_PER_DELIVERY intended.
+     *
      * @param string $url     Absolute endpoint URL.
      * @param int    $startTs Window start as a unix timestamp (inclusive).
      * @param int    $endTs   Requested window end as a unix timestamp (exclusive); may be shrunk.
-     * @return array{window_start: int, window_end: int, delivery_id: string, body: string}
+     * @return array{window_start: int, window_end: int, delivery_id: string, body: string, failure_reason?: string}
      */
     private static function freezeDelivery(string $url, int $startTs, int $endTs): array
     {
-        $boundary = Reports::conversionWindowEnd(
-            gmdate('Y-m-d H:i:s', $startTs),
-            gmdate('Y-m-d H:i:s', $endTs),
-            self::MAX_CONVERSIONS_PER_DELIVERY
-        );
+        $body          = false;
+        $failureReason = null;
 
-        $endTs = min($endTs, (int) strtotime($boundary . ' UTC'));
+        try {
+            $boundary = Reports::conversionWindowEnd(
+                gmdate('Y-m-d H:i:s', $startTs),
+                gmdate('Y-m-d H:i:s', $endTs),
+                self::MAX_CONVERSIONS_PER_DELIVERY
+            );
 
-        $payload = self::buildPayload($startTs, $endTs);
+            $endTs = min($endTs, (int) strtotime($boundary . ' UTC'));
 
-        $payload['delivery_id'] = self::deliveryId($url, $startTs, $endTs);
+            $payload = self::buildPayload($startTs, $endTs);
 
-        // wp_json_encode() returns false on failure — casting that to ''
-        // would silently deliver an empty body, and a 2xx from the endpoint
-        // would then advance the marker past a window that was never really
-        // sent. A filter can introduce an unencodable value (a resource, a
-        // recursive structure, invalid UTF-8); when that happens the empty
-        // body below is treated as a FAILED attempt by attemptDelivery() and
-        // enters the normal retry chain. Deliberately NOT rebuilt without
-        // the 'spa_webhook_payload' filter: the filter may exist to redact
-        // sensitive data, and quietly sending the unfiltered payload would
-        // bypass that.
-        $body = wp_json_encode($payload);
+            $payload['delivery_id'] = self::deliveryId($url, $startTs, $endTs);
 
-        return [
+            // wp_json_encode() returns false on failure — casting that to ''
+            // would silently deliver an empty body, and a 2xx from the
+            // endpoint would then advance the marker past a window that was
+            // never really sent. A filter can introduce an unencodable value
+            // (a resource, a recursive structure, invalid UTF-8); when that
+            // happens the empty body below is treated as a FAILED attempt by
+            // attemptDelivery() and enters the normal retry chain.
+            // Deliberately NOT rebuilt without the 'spa_webhook_payload'
+            // filter: the filter may exist to redact sensitive data, and
+            // quietly sending the unfiltered payload would bypass that.
+            $body = wp_json_encode($payload);
+        } catch (ReportQueryException $e) {
+            self::logReportQueryFailure($e);
+            $failureReason = 'report_query_failed';
+        }
+
+        $delivery = [
             'window_start' => $startTs,
             'window_end'   => $endTs,
-            'delivery_id'  => $payload['delivery_id'],
+            // Recomputed rather than read from $payload — deliveryId() is a
+            // pure function of ($url, $startTs, $endTs), so this is
+            // byte-identical to what the try block would have produced, and
+            // stays available even when the try block never reached that line.
+            'delivery_id'  => self::deliveryId($url, $startTs, $endTs),
             'body'         => is_string($body) ? $body : '',
         ];
+
+        if ($failureReason !== null) {
+            $delivery['failure_reason'] = $failureReason;
+        }
+
+        return $delivery;
+    }
+
+    /**
+     * Logs a report-query failure's raw diagnostic to the PHP error log, at
+     * most once per cooldown — see {@see REPORT_FAILURE_LOG_FLAG}.
+     *
+     * @param \Throwable $e The caught ReportQueryException.
+     * @return void
+     */
+    private static function logReportQueryFailure(\Throwable $e): void
+    {
+        if (get_transient(self::REPORT_FAILURE_LOG_FLAG) !== false) {
+            return;
+        }
+
+        set_transient(self::REPORT_FAILURE_LOG_FLAG, time(), 15 * MINUTE_IN_SECONDS);
+
+        error_log('SitePulse Analytics: report query failed during webhook dispatch - ' . $e->getMessage());
     }
 
     /**
@@ -712,7 +800,7 @@ final class WebhookDispatcher
      *
      * @param string               $url   Endpoint URL the state belongs to.
      * @param array<string, mixed> $state Stored retry state (possibly empty).
-     * @return array{window_start: int, window_end: int, delivery_id: string, body: string}
+     * @return array{window_start: int, window_end: int, delivery_id: string, body: string, failure_reason?: string}
      */
     private static function deliveryFromState(string $url, array $state): array
     {
@@ -740,20 +828,24 @@ final class WebhookDispatcher
      * retry chain is cancelled.
      *
      * @param string                                                                  $url      Absolute endpoint URL.
-     * @param array{window_start: int, window_end: int, delivery_id: string, body: string} $delivery Frozen delivery.
+     * @param array{window_start: int, window_end: int, delivery_id: string, body: string, failure_reason?: string} $delivery Frozen delivery.
      * @param string                                                                  $kind     Delivery kind for the log: 'scheduled' or 'retry'.
      * @param int                                                                     $attempt  Retry attempt number (0 for scheduled runs).
      * @return bool True when the endpoint returned a 2xx response.
      */
     private static function attemptDelivery(string $url, array $delivery, string $kind, int $attempt): bool
     {
-        // An empty body means payload encoding failed (see freezeDelivery()).
-        // Sending it could earn a 2xx from a lenient endpoint and advance the
-        // marker past a window whose data was never delivered — log the
-        // failure instead so the normal retry chain (which rebuilds the
-        // payload from the frozen window) takes over.
+        // An empty body means either payload encoding failed or a report
+        // query failed (see freezeDelivery()) — either way, sending it could
+        // earn a 2xx from a lenient endpoint and advance the marker past a
+        // window whose data was never delivered. Log the failure instead so
+        // the normal retry chain (which rebuilds the payload from the frozen
+        // window, trying the query again) takes over.
         if ($delivery['body'] === '') {
-            $result = ['ok' => false, 'code' => 0, 'message' => 'Payload could not be JSON-encoded', 'body' => ''];
+            $message = (($delivery['failure_reason'] ?? null) === 'report_query_failed')
+                ? self::REPORT_FAILURE_MESSAGE
+                : 'Payload could not be JSON-encoded';
+            $result  = ['ok' => false, 'code' => 0, 'message' => $message, 'body' => ''];
         } else {
             $result = self::sendToEndpoint($url, $delivery['body'], $delivery['delivery_id']);
         }
@@ -795,7 +887,7 @@ final class WebhookDispatcher
      *
      * @param string                                                                  $url      Endpoint URL to retry.
      * @param int                                                                     $attempt  Attempt number being scheduled (1-based).
-     * @param array{window_start: int, window_end: int, delivery_id: string, body: string} $delivery Frozen delivery to re-send.
+     * @param array{window_start: int, window_end: int, delivery_id: string, body: string, failure_reason?: string} $delivery Frozen delivery to re-send.
      * @return void
      */
     private static function scheduleRetry(string $url, int $attempt, array $delivery): void
@@ -820,7 +912,7 @@ final class WebhookDispatcher
      * @param string                                                                  $url          Endpoint URL.
      * @param int                                                                     $attempt      Attempt number (next to run, or last made when exhausted).
      * @param int                                                                     $scheduledFor Unix timestamp of the pending cron event (0 when exhausted).
-     * @param array{window_start: int, window_end: int, delivery_id: string, body: string} $delivery     Frozen delivery.
+     * @param array{window_start: int, window_end: int, delivery_id: string, body: string, failure_reason?: string} $delivery     Frozen delivery.
      * @param bool                                                                    $exhausted    True when no cron is pending and the next scheduled dispatch must resume the delivery.
      * @return void
      */

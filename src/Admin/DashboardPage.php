@@ -5,6 +5,7 @@ namespace SitePulseAnalytics\Admin;
 
 if (!defined('ABSPATH')) exit;
 
+use SitePulseAnalytics\Database\ReportQueryException;
 use SitePulseAnalytics\Database\Reports;
 use SitePulseAnalytics\Settings\Options;
 use SitePulseAnalytics\Tracking\RestController;
@@ -114,31 +115,56 @@ final class DashboardPage
         }
 
         $days = self::currentPeriod();
-        $end  = gmdate('Y-m-d H:i:s');
+
+        // Clamped to the configured retention window: querying/displaying the
+        // full nominal period when retention is shorter would silently
+        // zero-fill days past the actual cutoff, pad the chart with bars that
+        // can never have data, and understate any "per day" average.
+        $effectiveDays = min($days, Options::retentionDays());
+        $end           = gmdate('Y-m-d H:i:s');
 
         // Align the range to calendar days (UTC): the period covers the last
         // N days *including today*, so the chart renders exactly N bars.
-        $start = gmdate('Y-m-d 00:00:00', time() - ($days - 1) * DAY_IN_SECONDS);
+        $start = gmdate('Y-m-d 00:00:00', time() - ($effectiveDays - 1) * DAY_IN_SECONDS);
 
-        $totals = Reports::totalsByType($start, $end);
-        $daily  = Reports::dailyCounts($start, $end, 'pageview');
+        // Queried together and guarded by one try/catch: a failure partway
+        // through (e.g. conversionCount() failing after totalsByType()
+        // already succeeded) must not render summary cards built from only
+        // half of these values, so nothing below this block runs on
+        // any exception — the Overview section renders one error notice
+        // instead of cards/chart built from an incomplete fetch.
+        $overviewFailed = false;
+        $totals = [];
+        $daily  = [];
 
-        // The Confirmed Conversions card must agree with the Campaigns and
-        // Channels reports, which deduplicate by conversion id — the raw
-        // per-type row count can include at-least-once redeliveries stored
-        // before batch-id dedup existed.
-        $totals['form_success'] = Reports::conversionCount($start, $end);
+        try {
+            $totals = Reports::totalsByType($start, $end);
+            $daily  = Reports::dailyCounts($start, $end, 'pageview');
+
+            // The Confirmed Conversions card must agree with the Campaigns
+            // and Channels reports, which deduplicate by conversion id — the
+            // raw per-type row count can include at-least-once redeliveries
+            // stored before batch-id dedup existed.
+            $totals['form_success'] = Reports::conversionCount($start, $end);
+        } catch (ReportQueryException $e) {
+            $overviewFailed = true;
+        }
 
         echo '<div class="wrap spa-wrap spa-dash">';
         echo '<h1>SitePulse Analytics</h1>';
 
         self::maybeRenderRateLimitNotice();
-        self::renderPeriodFilter($days);
+        self::maybeRenderRetentionNotice($days);
+        self::renderPeriodFilter($days, $effectiveDays);
 
         echo '<section class="spa-overview" aria-labelledby="spa-h-overview">';
         echo '<h2 id="spa-h-overview">Overview</h2>';
-        self::renderSummaryCards($totals);
-        self::renderPageviewChart($daily, $days);
+        if ($overviewFailed) {
+            self::renderErrorNotice();
+        } else {
+            self::renderSummaryCards($totals);
+            self::renderPageviewChart($daily, $effectiveDays);
+        }
         echo '</section>';
 
         // Revealed by dashboard.js: without JavaScript the buttons would do
@@ -207,6 +233,28 @@ final class DashboardPage
     }
 
     /**
+     * Warns when the selected period is longer than the configured retention
+     * window — the numbers and chart below only ever cover the shorter,
+     * effective window, so this flags the mismatch rather than leaving the
+     * visitor to infer it from an unusually low average.
+     *
+     * @param int $days Nominal selected period in days (before clamping).
+     * @return void
+     */
+    private static function maybeRenderRetentionNotice(int $days): void
+    {
+        $retention = Options::retentionDays();
+        if ($days <= $retention) {
+            return;
+        }
+
+        echo '<div class="notice notice-warning spa-retention-notice spa-rate-limit-notice"><p><strong>SitePulse Analytics:</strong> '
+            . 'The selected ' . (int) $days . '-day period is longer than the configured data retention window ('
+            . (int) $retention . ' days), so events older than ' . (int) $retention . ' days have already been deleted '
+            . 'and cannot appear below. Choose a shorter period, or raise <strong>Data retention</strong> in Settings.</p></div>';
+    }
+
+    /**
      * Returns the validated period (in days) from the request, defaulting to 30.
      *
      * @return int
@@ -222,12 +270,13 @@ final class DashboardPage
      * Renders the 7/30/90-day period selector as a segmented button group,
      * with the covered UTC date range spelled out below it.
      *
-     * @param int $active Currently selected period in days.
+     * @param int $active        Currently selected period in days (button state).
+     * @param int $effectiveDays Retention-clamped period actually queried/displayed.
      * @return void
      */
-    private static function renderPeriodFilter(int $active): void
+    private static function renderPeriodFilter(int $active, int $effectiveDays): void
     {
-        $startLabel = self::utcDate('M j, Y', time() - ($active - 1) * DAY_IN_SECONDS);
+        $startLabel = self::utcDate('M j, Y', time() - ($effectiveDays - 1) * DAY_IN_SECONDS);
         $endLabel   = self::utcDate('M j, Y', time());
 
         echo '<div class="spa-period">';
@@ -253,10 +302,16 @@ final class DashboardPage
 
         // Print-only report header (dashboard.css shows it in @media print):
         // site, range, and generation time so a saved PDF is self-describing.
+        // Uses $effectiveDays, not the nominal $active — a clamped period
+        // must say so here too, or a saved PDF would claim a wider range than
+        // the data it actually contains.
         $generatedFormat = trim(get_option('date_format', 'F j, Y') . ' ' . get_option('time_format', 'g:i a'));
+        $rangeNote = $active === $effectiveDays
+            ? ((string) $active . ' days')
+            : ($active . ' days selected; ' . $effectiveDays . ' days shown per data retention');
         echo '<p class="spa-print-meta">'
             . esc_html(get_bloginfo('name')) . ' &mdash; SitePulse Analytics report &middot; '
-            . esc_html($startLabel) . ' &ndash; ' . esc_html($endLabel) . ' (UTC, last ' . (int) $active . ' days; the final day was still collecting when generated) &middot; Generated '
+            . esc_html($startLabel) . ' &ndash; ' . esc_html($endLabel) . ' (UTC, last ' . esc_html($rangeNote) . '; the final day was still collecting when generated) &middot; Generated '
             . esc_html(get_date_from_gmt(gmdate('Y-m-d H:i:s'), $generatedFormat))
             . ' (' . esc_html(self::siteTimezoneLabel()) . ')</p>';
         echo '</div>';
@@ -277,7 +332,7 @@ final class DashboardPage
             'form_submit'  => ['Form Submit Attempts', 'Counted when a form is submitted, before the server confirms success.'],
             'form_success' => ['Confirmed Conversions', 'Submissions the form plugin confirmed the server accepted.'],
             'hover'        => ['Hovers', ''],
-            'scroll_depth' => ['Scroll Milestones', 'Times visitors reached 25%, 50%, 75%, or 100% of a page.'],
+            'scroll_depth' => ['Scroll Milestones', 'Times visitors reached 50% or 100% of a page.'],
         ];
 
         // Any custom event types recorded via spa_track_event() are summed
@@ -387,8 +442,19 @@ final class DashboardPage
         echo '<span class="spa-chart-key"><span class="spa-chart-key-swatch" aria-hidden="true"></span>Today (still collecting)</span>';
         echo '</p>';
 
+        // A density bucket, not a class per exact day count: retention can
+        // clamp the effective period to any value (not just 7/30/90), so the
+        // scroll/min-width treatment is keyed to "does this many bars need
+        // it" rather than an exact match that would silently miss anything
+        // else and fall back to unstyled.
+        $isWide      = $days > 10;
+        $layoutClass = 'spa-chart-layout' . ($isWide ? ' spa-chart-layout--wide' : '');
+        $minWidth    = $isWide ? max(640, $days * 16) : 0;
+
         echo '<div class="spa-chart-scroll">';
-        echo '<div class="spa-chart-layout spa-chart-layout--' . (int) $days . '">';
+        echo '<div class="' . esc_attr($layoutClass) . '"'
+            . ($minWidth > 0 ? ' style="--spa-chart-min-width:' . esc_attr((string) $minWidth) . 'px"' : '')
+            . '>';
 
         echo '<div class="spa-chart-yaxis" aria-hidden="true">';
         echo '<span>' . esc_html(number_format_i18n($scale)) . '</span>';
@@ -561,6 +627,46 @@ final class DashboardPage
         }
 
         echo '</tbody></table></div></div>';
+    }
+
+    /**
+     * Runs a report section's query-and-render callback, showing an inline
+     * error notice in its place — instead of a table silently full of
+     * zeros — when the underlying query fails. $wpdb turns a failed query
+     * into an empty/false result indistinguishable from a legitimate zero;
+     * {@see Reports}'s internal query helpers turn that back into a thrown
+     * {@see ReportQueryException} so this can tell the two apart.
+     *
+     * @param string   $title  Report heading, reused for the error notice's own heading.
+     * @param callable $render Runs the normal query + {@see renderReportTable()} call.
+     * @return void
+     */
+    private static function renderQueriedTable(string $title, callable $render): void
+    {
+        try {
+            $render();
+        } catch (ReportQueryException $e) {
+            echo '<div class="spa-report">';
+            echo '<h3>' . esc_html($title) . '</h3>';
+            self::renderErrorNotice();
+            echo '</div>';
+        }
+    }
+
+    /**
+     * The inline notice shown in place of a report section whose query
+     * failed. Deliberately does not include the raw database error text —
+     * that can incidentally contain table/column names or query fragments
+     * not meant for this surface; anything more specific belongs in the PHP
+     * error log, not here.
+     *
+     * @return void
+     */
+    private static function renderErrorNotice(): void
+    {
+        echo '<div class="notice notice-error inline spa-report-error"><p>'
+            . 'This section could not be loaded due to a database error. Your data is safe — '
+            . 'try refreshing shortly, or check your site\'s PHP error log if this continues.</p></div>';
     }
 
     /**
@@ -764,23 +870,25 @@ final class DashboardPage
      */
     private static function renderTopPages(string $start, string $end): void
     {
-        $rows = Reports::topPages($start, $end);
+        self::renderQueriedTable('Top Pages', static function () use ($start, $end): void {
+            $rows = Reports::topPages($start, $end);
 
-        self::renderReportTable(
-            'Top Pages',
-            'The most-viewed pages (up to 10 shown). Sessions group one visit within a 30-minute inactivity window.',
-            [
-                ['label' => 'Page'],
-                ['label' => 'Views', 'num' => true],
-                ['label' => 'Sessions', 'num' => true],
-            ],
-            array_map(static fn(array $row): array => [
-                self::cellPage($row['page_url'], $row['page_title']),
-                self::cellNum($row['views']),
-                self::cellNum($row['sessions']),
-            ], $rows),
-            'No page views recorded in this period.'
-        );
+            self::renderReportTable(
+                'Top Pages',
+                'The most-viewed pages (up to 10 shown). Sessions group one visit within a 30-minute inactivity window.',
+                [
+                    ['label' => 'Page'],
+                    ['label' => 'Views', 'num' => true],
+                    ['label' => 'Sessions', 'num' => true],
+                ],
+                array_map(static fn(array $row): array => [
+                    self::cellPage($row['page_url'], $row['page_title']),
+                    self::cellNum($row['views']),
+                    self::cellNum($row['sessions']),
+                ], $rows),
+                'No page views recorded in this period.'
+            );
+        });
     }
 
     /**
@@ -793,21 +901,23 @@ final class DashboardPage
      */
     private static function renderLandingPages(string $start, string $end): void
     {
-        $rows = Reports::topLandingPages($start, $end);
+        self::renderQueriedTable('Top Landing Pages', static function () use ($start, $end): void {
+            $rows = Reports::topLandingPages($start, $end);
 
-        self::renderReportTable(
-            'Top Landing Pages',
-            'The first page of each session that started in this period — where visitors actually arrive. Up to 10 shown.',
-            [
-                ['label' => 'Landing Page'],
-                ['label' => 'Sessions', 'num' => true],
-            ],
-            array_map(static fn(array $row): array => [
-                self::cellPage($row['page_url'], $row['page_title']),
-                self::cellNum($row['sessions']),
-            ], $rows),
-            'No sessions recorded in this period.'
-        );
+            self::renderReportTable(
+                'Top Landing Pages',
+                'The first page of each session that started in this period — where visitors actually arrive. Up to 10 shown.',
+                [
+                    ['label' => 'Landing Page'],
+                    ['label' => 'Sessions', 'num' => true],
+                ],
+                array_map(static fn(array $row): array => [
+                    self::cellPage($row['page_url'], $row['page_title']),
+                    self::cellNum($row['sessions']),
+                ], $rows),
+                'No sessions recorded in this period.'
+            );
+        });
     }
 
     /**
@@ -819,23 +929,25 @@ final class DashboardPage
      */
     private static function renderTopClicks(string $start, string $end): void
     {
-        $rows = Reports::topClicks($start, $end);
+        self::renderQueriedTable('Top Clicked Elements', static function () use ($start, $end): void {
+            $rows = Reports::topClicks($start, $end);
 
-        self::renderReportTable(
-            'Top Clicked Elements',
-            'The links and buttons visitors click most (up to 10 shown).',
-            [
-                ['label' => 'Element'],
-                ['label' => 'Destination'],
-                ['label' => 'Clicks', 'num' => true],
-            ],
-            array_map(static fn(array $row): array => [
-                self::cellText($row['element_label'] !== '' ? $row['element_label'] : '(unlabeled ' . $row['element_tag'] . ')'),
-                self::cellLink($row['target_url']),
-                self::cellNum($row['clicks']),
-            ], $rows),
-            'No clicks recorded in this period.'
-        );
+            self::renderReportTable(
+                'Top Clicked Elements',
+                'The links and buttons visitors click most (up to 10 shown).',
+                [
+                    ['label' => 'Element'],
+                    ['label' => 'Destination'],
+                    ['label' => 'Clicks', 'num' => true],
+                ],
+                array_map(static fn(array $row): array => [
+                    self::cellText($row['element_label'] !== '' ? $row['element_label'] : '(unlabeled ' . $row['element_tag'] . ')'),
+                    self::cellLink($row['target_url']),
+                    self::cellNum($row['clicks']),
+                ], $rows),
+                'No clicks recorded in this period.'
+            );
+        });
     }
 
     /**
@@ -847,23 +959,25 @@ final class DashboardPage
      */
     private static function renderTopForms(string $start, string $end): void
     {
-        $rows = Reports::topForms($start, $end);
+        self::renderQueriedTable('Top Form Submit Attempts', static function () use ($start, $end): void {
+            $rows = Reports::topForms($start, $end);
 
-        self::renderReportTable(
-            'Top Form Submit Attempts',
-            'Counted when a visitor submits the form — success is not confirmed (see Confirmed Conversions). Up to 10 shown.',
-            [
-                ['label' => 'Form'],
-                ['label' => 'Page'],
-                ['label' => 'Attempts', 'num' => true],
-            ],
-            array_map(static fn(array $row): array => [
-                self::cellText($row['element_label'] !== '' ? $row['element_label'] : '(unnamed form)'),
-                self::cellLink($row['page_url']),
-                self::cellNum($row['submissions']),
-            ], $rows),
-            'No form submissions recorded in this period.'
-        );
+            self::renderReportTable(
+                'Top Form Submit Attempts',
+                'Counted when a visitor submits the form — success is not confirmed (see Confirmed Conversions). Up to 10 shown.',
+                [
+                    ['label' => 'Form'],
+                    ['label' => 'Page'],
+                    ['label' => 'Attempts', 'num' => true],
+                ],
+                array_map(static fn(array $row): array => [
+                    self::cellText($row['element_label'] !== '' ? $row['element_label'] : '(unnamed form)'),
+                    self::cellLink($row['page_url']),
+                    self::cellNum($row['submissions']),
+                ], $rows),
+                'No form submissions recorded in this period.'
+            );
+        });
     }
 
     /**
@@ -875,23 +989,25 @@ final class DashboardPage
      */
     private static function renderTopHovers(string $start, string $end): void
     {
-        $rows = Reports::topHovers($start, $end);
+        self::renderQueriedTable('Most Hovered Elements', static function () use ($start, $end): void {
+            $rows = Reports::topHovers($start, $end);
 
-        self::renderReportTable(
-            'Most Hovered Elements',
-            'Elements the pointer rested on — where visitor attention lingers before (or without) a click. Up to 10 shown.',
-            [
-                ['label' => 'Element'],
-                ['label' => 'Type'],
-                ['label' => 'Hovers', 'num' => true],
-            ],
-            array_map(static fn(array $row): array => [
-                self::cellText($row['element_label'] !== '' ? $row['element_label'] : '(unlabeled element)'),
-                self::cellText($row['element_tag']),
-                self::cellNum($row['hovers']),
-            ], $rows),
-            'No hover activity recorded in this period.'
-        );
+            self::renderReportTable(
+                'Most Hovered Elements',
+                'Elements the pointer rested on — where visitor attention lingers before (or without) a click. Up to 10 shown.',
+                [
+                    ['label' => 'Element'],
+                    ['label' => 'Type'],
+                    ['label' => 'Hovers', 'num' => true],
+                ],
+                array_map(static fn(array $row): array => [
+                    self::cellText($row['element_label'] !== '' ? $row['element_label'] : '(unlabeled element)'),
+                    self::cellText($row['element_tag']),
+                    self::cellNum($row['hovers']),
+                ], $rows),
+                'No hover activity recorded in this period.'
+            );
+        });
     }
 
     /**
@@ -903,21 +1019,23 @@ final class DashboardPage
      */
     private static function renderTopReferrers(string $start, string $end): void
     {
-        $rows = Reports::topReferrers($start, $end);
+        self::renderQueriedTable('Top Referrers', static function () use ($start, $end): void {
+            $rows = Reports::topReferrers($start, $end);
 
-        self::renderReportTable(
-            'Top Referrers',
-            'The external pages that sent this site the most visitors (up to 10 shown).',
-            [
-                ['label' => 'Referring Page'],
-                ['label' => 'Visits', 'num' => true],
-            ],
-            array_map(static fn(array $row): array => [
-                self::cellLink($row['referrer']),
-                self::cellNum($row['visits']),
-            ], $rows),
-            'No external referrers recorded in this period.'
-        );
+            self::renderReportTable(
+                'Top Referrers',
+                'The external pages that sent this site the most traffic (up to 10 shown).',
+                [
+                    ['label' => 'Referring Page'],
+                    ['label' => 'Pageviews', 'num' => true],
+                ],
+                array_map(static fn(array $row): array => [
+                    self::cellLink($row['referrer']),
+                    self::cellNum($row['visits']),
+                ], $rows),
+                'No external referrers recorded in this period.'
+            );
+        });
     }
 
     /**
@@ -931,34 +1049,36 @@ final class DashboardPage
      */
     private static function renderCampaigns(string $start, string $end): void
     {
-        $rows = Reports::topCampaigns($start, $end);
+        self::renderQueriedTable('Campaigns', static function () use ($start, $end): void {
+            $rows = Reports::topCampaigns($start, $end);
 
-        self::renderReportTable(
-            'Campaigns',
-            'Session-attributed performance of utm-tagged visits (up to 10 shown, ranked by views). Conv. rate is the share of sessions with at least one conversion.',
-            [
-                ['label' => 'Source'],
-                ['label' => 'Medium'],
-                ['label' => 'Campaign'],
-                ['label' => 'ID'],
-                ['label' => 'Sessions', 'num' => true],
-                ['label' => 'Views', 'num' => true],
-                ['label' => 'Conversions', 'num' => true],
-                ['label' => 'Conv. Rate', 'num' => true],
-            ],
-            array_map(static fn(array $row): array => [
-                self::cellText($row['utm_source']),
-                self::cellText($row['utm_medium']),
-                self::cellText($row['utm_campaign']),
-                self::cellText($row['utm_id']),
-                self::cellNum($row['sessions']),
-                self::cellNum($row['views']),
-                self::cellNum($row['conversions']),
-                self::cellText($row['sessions'] > 0 ? $row['conversion_rate'] . '%' : ''),
-            ], $rows),
-            'No campaign-tagged (utm) visits recorded in this period.',
-            true
-        );
+            self::renderReportTable(
+                'Campaigns',
+                'Session-attributed performance of utm-tagged visits (up to 10 shown, ranked by views, plus any campaigns that converted without a same-period pageview). Conv. rate is the share of sessions with at least one conversion.',
+                [
+                    ['label' => 'Source'],
+                    ['label' => 'Medium'],
+                    ['label' => 'Campaign'],
+                    ['label' => 'ID'],
+                    ['label' => 'Sessions', 'num' => true],
+                    ['label' => 'Views', 'num' => true],
+                    ['label' => 'Conversions', 'num' => true],
+                    ['label' => 'Conv. Rate', 'num' => true],
+                ],
+                array_map(static fn(array $row): array => [
+                    self::cellText($row['utm_source']),
+                    self::cellText($row['utm_medium']),
+                    self::cellText($row['utm_campaign']),
+                    self::cellText($row['utm_id']),
+                    self::cellNum($row['sessions']),
+                    self::cellNum($row['views']),
+                    self::cellNum($row['conversions']),
+                    self::cellText($row['sessions'] > 0 ? $row['conversion_rate'] . '%' : ''),
+                ], $rows),
+                'No campaign-tagged (utm) visits recorded in this period.',
+                true
+            );
+        });
     }
 
     /**
@@ -973,32 +1093,38 @@ final class DashboardPage
      */
     private static function renderCampaignContent(string $start, string $end): void
     {
-        $rows = Reports::topCampaignContent($start, $end);
+        self::renderQueriedTable('Campaign Terms & Content', static function () use ($start, $end): void {
+            $rows = Reports::topCampaignContent($start, $end);
 
-        self::renderReportTable(
-            'Campaign Terms & Content',
-            'Keyword (utm_term) and creative (utm_content) performance, with campaign context. Up to 10 shown.',
-            [
-                ['label' => 'Source'],
-                ['label' => 'Campaign'],
-                ['label' => 'Term'],
-                ['label' => 'Content'],
-                ['label' => 'Sessions', 'num' => true],
-                ['label' => 'Views', 'num' => true],
-                ['label' => 'Conversions', 'num' => true],
-            ],
-            array_map(static fn(array $row): array => [
-                self::cellText($row['utm_source']),
-                self::cellText($row['utm_campaign']),
-                self::cellText($row['utm_term']),
-                self::cellText($row['utm_content']),
-                self::cellNum($row['sessions']),
-                self::cellNum($row['views']),
-                self::cellNum($row['conversions']),
-            ], $rows),
-            'No visits carrying utm_term or utm_content tags were recorded in this period. Campaigns that never tag keywords or creatives simply don\'t appear here.',
-            true
-        );
+            self::renderReportTable(
+                'Campaign Terms & Content',
+                'Keyword (utm_term) and creative (utm_content) performance, with campaign context. Up to 10 shown.',
+                [
+                    ['label' => 'Source'],
+                    ['label' => 'Medium'],
+                    ['label' => 'Campaign'],
+                    ['label' => 'ID'],
+                    ['label' => 'Term'],
+                    ['label' => 'Content'],
+                    ['label' => 'Sessions', 'num' => true],
+                    ['label' => 'Views', 'num' => true],
+                    ['label' => 'Conversions', 'num' => true],
+                ],
+                array_map(static fn(array $row): array => [
+                    self::cellText($row['utm_source']),
+                    self::cellText($row['utm_medium']),
+                    self::cellText($row['utm_campaign']),
+                    self::cellText($row['utm_id']),
+                    self::cellText($row['utm_term']),
+                    self::cellText($row['utm_content']),
+                    self::cellNum($row['sessions']),
+                    self::cellNum($row['views']),
+                    self::cellNum($row['conversions']),
+                ], $rows),
+                'No visits carrying utm_term or utm_content tags were recorded in this period. Campaigns that never tag keywords or creatives simply don\'t appear here.',
+                true
+            );
+        });
     }
 
     /**
@@ -1011,27 +1137,29 @@ final class DashboardPage
      */
     private static function renderChannels(string $start, string $end): void
     {
-        $rows = Reports::channelBreakdown($start, $end);
+        self::renderQueriedTable('Channels', static function () use ($start, $end): void {
+            $rows = Reports::channelBreakdown($start, $end);
 
-        self::renderReportTable(
-            'Channels',
-            'Sessions and conversions per marketing channel, classified as events arrive. Conv. rate is the share of sessions with at least one conversion.',
-            [
-                ['label' => 'Channel'],
-                ['label' => 'Sessions', 'num' => true],
-                ['label' => 'Views', 'num' => true],
-                ['label' => 'Conversions', 'num' => true],
-                ['label' => 'Conv. Rate', 'num' => true],
-            ],
-            array_map(static fn(array $row): array => [
-                self::cellText($row['channel']),
-                self::cellNum($row['sessions']),
-                self::cellNum($row['views']),
-                self::cellNum($row['conversions']),
-                self::cellText($row['sessions'] > 0 ? $row['conversion_rate'] . '%' : ''),
-            ], $rows),
-            'No channel data recorded in this period. Channels are classified as new events arrive, so this fills in from the moment of the update onward.'
-        );
+            self::renderReportTable(
+                'Channels',
+                'Sessions and conversions per marketing channel, classified as events arrive. Conv. rate is the share of sessions with at least one conversion.',
+                [
+                    ['label' => 'Channel'],
+                    ['label' => 'Sessions', 'num' => true],
+                    ['label' => 'Views', 'num' => true],
+                    ['label' => 'Conversions', 'num' => true],
+                    ['label' => 'Conv. Rate', 'num' => true],
+                ],
+                array_map(static fn(array $row): array => [
+                    self::cellText($row['channel']),
+                    self::cellNum($row['sessions']),
+                    self::cellNum($row['views']),
+                    self::cellNum($row['conversions']),
+                    self::cellText($row['sessions'] > 0 ? $row['conversion_rate'] . '%' : ''),
+                ], $rows),
+                'No channel data recorded in this period. Channels are classified as new events arrive, so this fills in from the moment of the update onward.'
+            );
+        });
     }
 
     /**
@@ -1043,29 +1171,31 @@ final class DashboardPage
      */
     private static function renderDevices(string $start, string $end): void
     {
-        $devices = Reports::deviceBreakdown($start, $end);
-        $total   = array_sum($devices);
+        self::renderQueriedTable('Devices', static function () use ($start, $end): void {
+            $devices = Reports::deviceBreakdown($start, $end);
+            $total   = array_sum($devices);
 
-        $rows = [];
-        foreach ($devices as $device => $views) {
-            $rows[] = [
-                self::cellText(ucfirst($device)),
-                self::cellNum($views),
-                self::cellText($total > 0 ? round($views / $total * 100) . '%' : ''),
-            ];
-        }
+            $rows = [];
+            foreach ($devices as $device => $views) {
+                $rows[] = [
+                    self::cellText(ucfirst($device)),
+                    self::cellNum($views),
+                    self::cellText($total > 0 ? round($views / $total * 100) . '%' : ''),
+                ];
+            }
 
-        self::renderReportTable(
-            'Devices',
-            '',
-            [
-                ['label' => 'Device'],
-                ['label' => 'Page Views', 'num' => true],
-                ['label' => 'Share', 'num' => true],
-            ],
-            $rows,
-            'No page views recorded in this period.'
-        );
+            self::renderReportTable(
+                'Devices',
+                '',
+                [
+                    ['label' => 'Device'],
+                    ['label' => 'Page Views', 'num' => true],
+                    ['label' => 'Share', 'num' => true],
+                ],
+                $rows,
+                'No page views recorded in this period.'
+            );
+        });
     }
 
     /**
@@ -1079,42 +1209,44 @@ final class DashboardPage
      */
     private static function renderRecentEvents(): void
     {
-        $rows = Reports::recentEvents(15);
+        self::renderQueriedTable('Latest Events', static function (): void {
+            $rows = Reports::recentEvents(15);
 
-        // The site's own date/time display settings, as everywhere in wp-admin.
-        $format = trim(get_option('date_format', 'F j, Y') . ' ' . get_option('time_format', 'g:i a'));
+            // The site's own date/time display settings, as everywhere in wp-admin.
+            $format = trim(get_option('date_format', 'F j, Y') . ' ' . get_option('time_format', 'g:i a'));
 
-        $cells = [];
-        foreach ($rows as $row) {
-            $detail = $row['element_label'] !== '' ? $row['element_label'] : $row['target_url'];
-            if (($row['event_value'] ?? '') !== '') {
-                $detail = trim($detail . ' (' . $row['event_value'] . ')');
+            $cells = [];
+            foreach ($rows as $row) {
+                $detail = $row['element_label'] !== '' ? $row['element_label'] : $row['target_url'];
+                if (($row['event_value'] ?? '') !== '') {
+                    $detail = trim($detail . ' (' . $row['event_value'] . ')');
+                }
+
+                $cells[] = [
+                    self::cellText(get_date_from_gmt((string) $row['created_at'], $format)),
+                    self::cellText(self::eventLabel((string) $row['event_type'])),
+                    self::cellPage((string) $row['page_url'], (string) $row['page_title']),
+                    self::cellText($detail),
+                    self::cellText(ucfirst((string) $row['device'])),
+                ];
             }
 
-            $cells[] = [
-                self::cellText(get_date_from_gmt((string) $row['created_at'], $format)),
-                self::cellText(self::eventLabel((string) $row['event_type'])),
-                self::cellPage((string) $row['page_url'], (string) $row['page_title']),
-                self::cellText($detail),
-                self::cellText(ucfirst((string) $row['device'])),
-            ];
-        }
-
-        self::renderReportTable(
-            'Latest Events',
-            sprintf(
-                'The latest 15 events, independent of the selected reporting period. Times are shown in the site timezone (%s).',
-                self::siteTimezoneLabel()
-            ),
-            [
-                ['label' => 'When'],
-                ['label' => 'Event'],
-                ['label' => 'Page'],
-                ['label' => 'Detail'],
-                ['label' => 'Device'],
-            ],
-            $cells,
-            'No events recorded yet. Visit the site\'s frontend to start collecting data.'
-        );
+            self::renderReportTable(
+                'Latest Events',
+                sprintf(
+                    'The latest 15 events, independent of the selected reporting period. Times are shown in the site timezone (%s).',
+                    self::siteTimezoneLabel()
+                ),
+                [
+                    ['label' => 'When'],
+                    ['label' => 'Event'],
+                    ['label' => 'Page'],
+                    ['label' => 'Detail'],
+                    ['label' => 'Device'],
+                ],
+                $cells,
+                'No events recorded yet. Visit the site\'s frontend to start collecting data.'
+            );
+        });
     }
 }

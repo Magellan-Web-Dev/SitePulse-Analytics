@@ -13,9 +13,55 @@ use SitePulseAnalytics\Settings\Options;
  * Every method takes a UTC datetime range ('Y-m-d H:i:s') and returns plain
  * arrays ready for the dashboard tables and the webhook JSON payload, so the
  * two consumers always report identical numbers.
+ *
+ * Every query in this file runs through {@see queryRows()} or
+ * {@see queryValue()}, which check $wpdb->last_error immediately after
+ * execution and throw {@see ReportQueryException} on failure — $wpdb
+ * otherwise turns a failed query into an empty array or null indistinguishable
+ * from a legitimate zero, and last_error resets on every subsequent query, so
+ * the check has to happen right after each individual call, not once at the
+ * end of a longer chain.
  */
 final class Reports
 {
+    /**
+     * Runs a SELECT expected to return multiple rows.
+     *
+     * @param string $sql Fully-prepared SQL (already passed through $wpdb->prepare()).
+     * @return array<int, array<string, mixed>>
+     * @throws ReportQueryException When the query itself failed.
+     */
+    private static function queryRows(string $sql): array
+    {
+        global $wpdb;
+
+        $rows = $wpdb->get_results($sql, ARRAY_A);
+        if ($wpdb->last_error !== '') {
+            throw new ReportQueryException($wpdb->last_error);
+        }
+
+        return (array) $rows;
+    }
+
+    /**
+     * Runs a SELECT expected to return a single scalar value.
+     *
+     * @param string $sql Fully-prepared SQL (already passed through $wpdb->prepare()).
+     * @return string|null
+     * @throws ReportQueryException When the query itself failed.
+     */
+    private static function queryValue(string $sql): ?string
+    {
+        global $wpdb;
+
+        $value = $wpdb->get_var($sql);
+        if ($wpdb->last_error !== '') {
+            throw new ReportQueryException($wpdb->last_error);
+        }
+
+        return $value;
+    }
+
     /**
      * Total event counts per event type within a range.
      *
@@ -28,20 +74,17 @@ final class Reports
         global $wpdb;
         $table = DatabaseManager::tableName();
 
-        $rows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT event_type, COUNT(*) AS total
-                 FROM {$table}
-                 WHERE created_at >= %s AND created_at < %s
-                 GROUP BY event_type",
-                $start,
-                $end
-            ),
-            ARRAY_A
-        );
+        $rows = self::queryRows($wpdb->prepare(
+            "SELECT event_type, COUNT(*) AS total
+             FROM {$table}
+             WHERE created_at >= %s AND created_at < %s
+             GROUP BY event_type",
+            $start,
+            $end
+        ));
 
         $totals = [];
-        foreach ((array) $rows as $row) {
+        foreach ($rows as $row) {
             $totals[(string) $row['event_type']] = (int) $row['total'];
         }
 
@@ -62,22 +105,19 @@ final class Reports
         global $wpdb;
         $table = DatabaseManager::tableName();
 
-        $rows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT DATE(created_at) AS day, COUNT(*) AS total
-                 FROM {$table}
-                 WHERE event_type = %s AND created_at >= %s AND created_at < %s
-                 GROUP BY day
-                 ORDER BY day ASC",
-                $type,
-                $start,
-                $end
-            ),
-            ARRAY_A
-        );
+        $rows = self::queryRows($wpdb->prepare(
+            "SELECT DATE(created_at) AS day, COUNT(*) AS total
+             FROM {$table}
+             WHERE event_type = %s AND created_at >= %s AND created_at < %s
+             GROUP BY day
+             ORDER BY day ASC",
+            $type,
+            $start,
+            $end
+        ));
 
         $byDay = [];
-        foreach ((array) $rows as $row) {
+        foreach ($rows as $row) {
             $byDay[(string) $row['day']] = (int) $row['total'];
         }
 
@@ -107,28 +147,25 @@ final class Reports
         global $wpdb;
         $table = DatabaseManager::tableName();
 
-        $rows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT page_url, MAX(page_title) AS page_title,
-                        COUNT(*) AS views, COUNT(DISTINCT session_id) AS sessions
-                 FROM {$table}
-                 WHERE event_type = 'pageview' AND created_at >= %s AND created_at < %s
-                 GROUP BY page_url
-                 ORDER BY views DESC
-                 LIMIT %d",
-                $start,
-                $end,
-                $limit
-            ),
-            ARRAY_A
-        );
+        $rows = self::queryRows($wpdb->prepare(
+            "SELECT page_url, MAX(page_title) AS page_title,
+                    COUNT(*) AS views, COUNT(DISTINCT session_id) AS sessions
+             FROM {$table}
+             WHERE event_type = 'pageview' AND created_at >= %s AND created_at < %s
+             GROUP BY page_url
+             ORDER BY views DESC
+             LIMIT %d",
+            $start,
+            $end,
+            $limit
+        ));
 
         return array_map(static fn(array $row): array => [
             'page_url'   => (string) $row['page_url'],
             'page_title' => (string) $row['page_title'],
             'views'      => (int) $row['views'],
             'sessions'   => (int) $row['sessions'],
-        ], (array) $rows);
+        ], $rows);
     }
 
     /**
@@ -144,28 +181,25 @@ final class Reports
         global $wpdb;
         $table = DatabaseManager::tableName();
 
-        $rows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT element_label, MAX(element_tag) AS element_tag,
-                        target_url, COUNT(*) AS clicks
-                 FROM {$table}
-                 WHERE event_type = 'click' AND created_at >= %s AND created_at < %s
-                 GROUP BY element_label, target_url
-                 ORDER BY clicks DESC
-                 LIMIT %d",
-                $start,
-                $end,
-                $limit
-            ),
-            ARRAY_A
-        );
+        $rows = self::queryRows($wpdb->prepare(
+            "SELECT element_label, MAX(element_tag) AS element_tag,
+                    target_url, COUNT(*) AS clicks
+             FROM {$table}
+             WHERE event_type = 'click' AND created_at >= %s AND created_at < %s
+             GROUP BY element_label, target_url
+             ORDER BY clicks DESC
+             LIMIT %d",
+            $start,
+            $end,
+            $limit
+        ));
 
         return array_map(static fn(array $row): array => [
             'element_label' => (string) $row['element_label'],
             'element_tag'   => (string) $row['element_tag'],
             'target_url'    => (string) $row['target_url'],
             'clicks'        => (int) $row['clicks'],
-        ], (array) $rows);
+        ], $rows);
     }
 
     /**
@@ -181,26 +215,23 @@ final class Reports
         global $wpdb;
         $table = DatabaseManager::tableName();
 
-        $rows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT element_label, page_url, COUNT(*) AS submissions
-                 FROM {$table}
-                 WHERE event_type = 'form_submit' AND created_at >= %s AND created_at < %s
-                 GROUP BY element_label, page_url
-                 ORDER BY submissions DESC
-                 LIMIT %d",
-                $start,
-                $end,
-                $limit
-            ),
-            ARRAY_A
-        );
+        $rows = self::queryRows($wpdb->prepare(
+            "SELECT element_label, page_url, COUNT(*) AS submissions
+             FROM {$table}
+             WHERE event_type = 'form_submit' AND created_at >= %s AND created_at < %s
+             GROUP BY element_label, page_url
+             ORDER BY submissions DESC
+             LIMIT %d",
+            $start,
+            $end,
+            $limit
+        ));
 
         return array_map(static fn(array $row): array => [
             'element_label' => (string) $row['element_label'],
             'page_url'      => (string) $row['page_url'],
             'submissions'   => (int) $row['submissions'],
-        ], (array) $rows);
+        ], $rows);
     }
 
     /**
@@ -216,26 +247,23 @@ final class Reports
         global $wpdb;
         $table = DatabaseManager::tableName();
 
-        $rows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT element_label, element_tag, COUNT(*) AS hovers
-                 FROM {$table}
-                 WHERE event_type = 'hover' AND created_at >= %s AND created_at < %s
-                 GROUP BY element_label, element_tag
-                 ORDER BY hovers DESC
-                 LIMIT %d",
-                $start,
-                $end,
-                $limit
-            ),
-            ARRAY_A
-        );
+        $rows = self::queryRows($wpdb->prepare(
+            "SELECT element_label, element_tag, COUNT(*) AS hovers
+             FROM {$table}
+             WHERE event_type = 'hover' AND created_at >= %s AND created_at < %s
+             GROUP BY element_label, element_tag
+             ORDER BY hovers DESC
+             LIMIT %d",
+            $start,
+            $end,
+            $limit
+        ));
 
         return array_map(static fn(array $row): array => [
             'element_label' => (string) $row['element_label'],
             'element_tag'   => (string) $row['element_tag'],
             'hovers'        => (int) $row['hovers'],
-        ], (array) $rows);
+        ], $rows);
     }
 
     /**
@@ -262,25 +290,22 @@ final class Reports
         $hosts        = Options::allowedHosts();
         $placeholders = implode(', ', array_fill(0, count($hosts), '%s'));
 
-        $rows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT referrer, COUNT(*) AS visits
-                 FROM {$table}
-                 WHERE event_type = 'pageview' AND referrer <> ''
-                   AND SUBSTRING_INDEX(SUBSTRING_INDEX(referrer, '://', -1), '/', 1) NOT IN ({$placeholders})
-                   AND created_at >= %s AND created_at < %s
-                 GROUP BY referrer
-                 ORDER BY visits DESC
-                 LIMIT %d",
-                array_merge($hosts, [$start, $end, $limit])
-            ),
-            ARRAY_A
-        );
+        $rows = self::queryRows($wpdb->prepare(
+            "SELECT referrer, COUNT(*) AS visits
+             FROM {$table}
+             WHERE event_type = 'pageview' AND referrer <> ''
+               AND SUBSTRING_INDEX(SUBSTRING_INDEX(referrer, '://', -1), '/', 1) NOT IN ({$placeholders})
+               AND created_at >= %s AND created_at < %s
+             GROUP BY referrer
+             ORDER BY visits DESC
+             LIMIT %d",
+            array_merge($hosts, [$start, $end, $limit])
+        ));
 
         return array_map(static fn(array $row): array => [
             'referrer' => (string) $row['referrer'],
             'visits'   => (int) $row['visits'],
-        ], (array) $rows);
+        ], $rows);
     }
 
     /**
@@ -300,6 +325,11 @@ final class Reports
      * converting_sessions ÷ sessions (a session conversion rate, so multiple
      * conversions in one session cannot push it past 100%).
      *
+     * Campaigns that converted in-window but have no matching pageview
+     * anywhere in the window (not merely ranked outside the top $limit by
+     * views) are appended afterward, up to a small reserved budget — see the
+     * inline comments below for exactly how that budget is computed.
+     *
      * @param string $start UTC datetime (inclusive).
      * @param string $end   UTC datetime (exclusive).
      * @param int    $limit Maximum rows to return.
@@ -311,54 +341,59 @@ final class Reports
         $table  = DatabaseManager::tableName();
         $tagged = self::TAGGED_SQL;
 
-        $rows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT utm_source, utm_medium, utm_campaign, utm_id,
-                        MAX(channel) AS channel,
-                        COUNT(*) AS views, COUNT(DISTINCT session_id) AS sessions
-                 FROM {$table}
-                 WHERE event_type = 'pageview' AND {$tagged}
-                   AND created_at >= %s AND created_at < %s
-                 GROUP BY utm_source, utm_medium, utm_campaign, utm_id
-                 ORDER BY views DESC
-                 LIMIT %d",
-                $start,
-                $end,
-                $limit
-            ),
-            ARRAY_A
-        );
+        $rows = self::queryRows($wpdb->prepare(
+            "SELECT utm_source, utm_medium, utm_campaign, utm_id,
+                    MAX(channel) AS channel,
+                    COUNT(*) AS views, COUNT(DISTINCT session_id) AS sessions
+             FROM {$table}
+             WHERE event_type = 'pageview' AND {$tagged}
+               AND created_at >= %s AND created_at < %s
+             GROUP BY utm_source, utm_medium, utm_campaign, utm_id
+             ORDER BY views DESC, utm_source, utm_medium, utm_campaign, utm_id
+             LIMIT %d",
+            $start,
+            $end,
+            $limit
+        ));
 
-        $conversionRows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT utm_source, utm_medium, utm_campaign, utm_id,
-                        COUNT(DISTINCT event_value) AS conversions,
-                        COUNT(DISTINCT session_id) AS converting_sessions
-                 FROM {$table}
-                 WHERE event_type = 'form_success' AND {$tagged}
-                   AND created_at >= %s AND created_at < %s
-                 GROUP BY utm_source, utm_medium, utm_campaign, utm_id",
-                $start,
-                $end
-            ),
-            ARRAY_A
-        );
+        // Channel is included here too (mirroring the pageview query's own
+        // MAX(channel)) — form_success rows carry a real classified channel
+        // just like any other attributed event type, needed for campaigns
+        // that converted without ranking among the pageview rows above.
+        $conversionRows = self::queryRows($wpdb->prepare(
+            "SELECT utm_source, utm_medium, utm_campaign, utm_id,
+                    MAX(channel) AS channel,
+                    COUNT(DISTINCT event_value) AS conversions,
+                    COUNT(DISTINCT session_id) AS converting_sessions
+             FROM {$table}
+             WHERE event_type = 'form_success' AND {$tagged}
+               AND created_at >= %s AND created_at < %s
+             GROUP BY utm_source, utm_medium, utm_campaign, utm_id",
+            $start,
+            $end
+        ));
 
         $conversions = [];
-        foreach ((array) $conversionRows as $row) {
-            $key = $row['utm_source'] . '|' . $row['utm_medium'] . '|' . $row['utm_campaign'] . '|' . $row['utm_id'];
+        foreach ($conversionRows as $row) {
+            $key = self::campaignKey($row['utm_source'], $row['utm_medium'], $row['utm_campaign'], $row['utm_id']);
             $conversions[$key] = [
+                'channel'             => (string) $row['channel'],
                 'conversions'         => (int) $row['conversions'],
                 'converting_sessions' => (int) $row['converting_sessions'],
             ];
         }
 
-        return array_map(static function (array $row) use ($conversions): array {
-            $key        = $row['utm_source'] . '|' . $row['utm_medium'] . '|' . $row['utm_campaign'] . '|' . $row['utm_id'];
-            $sessions   = (int) $row['sessions'];
-            $counts     = $conversions[$key] ?? ['conversions' => 0, 'converting_sessions' => 0];
+        $out = [];
+        foreach ($rows as $row) {
+            $key      = self::campaignKey($row['utm_source'], $row['utm_medium'], $row['utm_campaign'], $row['utm_id']);
+            $sessions = (int) $row['sessions'];
+            $counts   = $conversions[$key] ?? ['conversions' => 0, 'converting_sessions' => 0];
+            // Matched keys are removed so anything left in $conversions is a
+            // genuine candidate for the orphan check below, not yet confirmed
+            // orphaned (it may simply rank outside the top $limit by views).
+            unset($conversions[$key]);
 
-            return [
+            $out[] = [
                 'utm_source'          => (string) $row['utm_source'],
                 'utm_medium'          => (string) $row['utm_medium'],
                 'utm_campaign'        => (string) $row['utm_campaign'],
@@ -370,7 +405,85 @@ final class Reports
                 'converting_sessions' => $counts['converting_sessions'],
                 'conversion_rate'     => self::sessionRate($counts['converting_sessions'], $sessions),
             ];
-        }, (array) $rows);
+        }
+
+        // Reserve room for genuinely-orphaned conversions (converted, but no
+        // matching pageview anywhere in the window, not merely ranked outside
+        // the top $limit) — but only take a slot away from real traffic rows
+        // when there's actually a traffic row to protect, and only when
+        // $conversions still has unmatched candidates worth checking.
+        $preserveTraffic = ($out !== []) ? 1 : 0;
+        $orphanLimit     = min(3, max(0, $limit - $preserveTraffic));
+
+        if ($orphanLimit > 0 && $conversions !== []) {
+            $orphanRows = self::queryRows($wpdb->prepare(
+                "SELECT c.utm_source, c.utm_medium, c.utm_campaign, c.utm_id, c.channel,
+                        c.conversions, c.converting_sessions
+                 FROM (
+                     SELECT utm_source, utm_medium, utm_campaign, utm_id, MAX(channel) AS channel,
+                            COUNT(DISTINCT event_value) AS conversions,
+                            COUNT(DISTINCT session_id) AS converting_sessions
+                     FROM {$table}
+                     WHERE event_type = 'form_success' AND {$tagged}
+                       AND created_at >= %s AND created_at < %s
+                     GROUP BY utm_source, utm_medium, utm_campaign, utm_id
+                 ) AS c
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM {$table} AS p
+                     WHERE p.event_type = 'pageview' AND {$tagged}
+                       AND p.created_at >= %s AND p.created_at < %s
+                       AND p.utm_source = c.utm_source AND p.utm_medium = c.utm_medium
+                       AND p.utm_campaign = c.utm_campaign AND p.utm_id = c.utm_id
+                 )
+                 ORDER BY c.conversions DESC, c.utm_source, c.utm_medium, c.utm_campaign, c.utm_id
+                 LIMIT %d",
+                $start,
+                $end,
+                $start,
+                $end,
+                $orphanLimit
+            ));
+
+            $orphanCount = min($orphanLimit, count($orphanRows));
+            if ($orphanCount > 0) {
+                $out = array_slice($out, 0, max(0, $limit - $orphanCount));
+
+                foreach (array_slice($orphanRows, 0, $orphanCount) as $row) {
+                    $out[] = [
+                        'utm_source'          => (string) $row['utm_source'],
+                        'utm_medium'          => (string) $row['utm_medium'],
+                        'utm_campaign'        => (string) $row['utm_campaign'],
+                        'utm_id'              => (string) $row['utm_id'],
+                        'channel'             => (string) $row['channel'],
+                        'views'               => 0,
+                        'sessions'            => 0,
+                        'conversions'         => (int) $row['conversions'],
+                        'converting_sessions' => (int) $row['converting_sessions'],
+                        'conversion_rate'     => 0.0,
+                    ];
+                }
+            }
+        }
+
+        return $out;
+    }
+
+    /**
+     * Collision-safe composite key for a four-field UTM combination, joined
+     * with a delimiter (ASCII unit separator) unlikely to appear in real UTM
+     * values — unlike a plain pipe-concatenation, a UTM value containing a
+     * literal delimiter character can't collide two distinct campaigns into
+     * one key.
+     *
+     * @param string $source   utm_source.
+     * @param string $medium   utm_medium.
+     * @param string $campaign utm_campaign.
+     * @param string $id       utm_id.
+     * @return string
+     */
+    private static function campaignKey(string $source, string $medium, string $campaign, string $id): string
+    {
+        return implode("\x1f", [$source, $medium, $campaign, $id]);
     }
 
     /**
@@ -411,7 +524,7 @@ final class Reports
      * @param string $start UTC datetime (inclusive).
      * @param string $end   UTC datetime (exclusive).
      * @param int    $limit Maximum rows to return.
-     * @return array<int, array{utm_source: string, utm_campaign: string, utm_term: string, utm_content: string, views: int, sessions: int, conversions: int}>
+     * @return array<int, array{utm_source: string, utm_medium: string, utm_campaign: string, utm_id: string, utm_term: string, utm_content: string, views: int, sessions: int, conversions: int}>
      */
     public static function topCampaignContent(string $start, string $end, int $limit = 10): array
     {
@@ -419,56 +532,114 @@ final class Reports
         $table    = DatabaseManager::tableName();
         $detailed = "(utm_term <> '' OR utm_content <> '')";
 
-        $rows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT utm_source, utm_campaign, utm_term, utm_content,
-                        COUNT(*) AS views, COUNT(DISTINCT session_id) AS sessions
-                 FROM {$table}
-                 WHERE event_type = 'pageview' AND {$detailed}
-                   AND created_at >= %s AND created_at < %s
-                 GROUP BY utm_source, utm_campaign, utm_term, utm_content
-                 ORDER BY views DESC
-                 LIMIT %d",
-                $start,
-                $end,
-                $limit
-            ),
-            ARRAY_A
-        );
-
-        $conversionRows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT utm_source, utm_campaign, utm_term, utm_content,
-                        COUNT(DISTINCT event_value) AS conversions
-                 FROM {$table}
-                 WHERE event_type = 'form_success' AND {$detailed}
-                   AND created_at >= %s AND created_at < %s
-                 GROUP BY utm_source, utm_campaign, utm_term, utm_content",
-                $start,
-                $end
-            ),
-            ARRAY_A
-        );
+        $rows = self::queryRows($wpdb->prepare(
+            "SELECT utm_source, utm_medium, utm_campaign, utm_id, utm_term, utm_content,
+                    COUNT(*) AS views, COUNT(DISTINCT session_id) AS sessions
+             FROM {$table}
+             WHERE event_type = 'pageview' AND {$detailed}
+               AND created_at >= %s AND created_at < %s
+             GROUP BY utm_source, utm_medium, utm_campaign, utm_id, utm_term, utm_content
+             ORDER BY views DESC
+             LIMIT %d",
+            $start,
+            $end,
+            $limit
+        ));
 
         $conversions = [];
-        foreach ((array) $conversionRows as $row) {
-            $key = $row['utm_source'] . '|' . $row['utm_campaign'] . '|' . $row['utm_term'] . '|' . $row['utm_content'];
-            $conversions[$key] = (int) $row['conversions'];
+
+        // Bounded to the same (at most $limit) combinations already selected
+        // above. Unlike topCampaigns(), this drilldown never surfaces
+        // conversion-only combinations, so a conversion for any combination
+        // outside this set would never appear in the output anyway —
+        // restricting the query this way avoids aggregating the full,
+        // unbounded universe of converting combinations just to discard
+        // almost all of it.
+        if ($rows !== []) {
+            $placeholders = [];
+            $params       = [];
+            foreach ($rows as $row) {
+                $placeholders[] = '(%s,%s,%s,%s,%s,%s)';
+                $params[] = $row['utm_source'];
+                $params[] = $row['utm_medium'];
+                $params[] = $row['utm_campaign'];
+                $params[] = $row['utm_id'];
+                $params[] = $row['utm_term'];
+                $params[] = $row['utm_content'];
+            }
+            $params[] = $start;
+            $params[] = $end;
+
+            $conversionRows = self::queryRows($wpdb->prepare(
+                "SELECT utm_source, utm_medium, utm_campaign, utm_id, utm_term, utm_content,
+                        COUNT(DISTINCT event_value) AS conversions
+                 FROM {$table}
+                 WHERE event_type = 'form_success'
+                   AND (utm_source, utm_medium, utm_campaign, utm_id, utm_term, utm_content) IN ("
+                    . implode(', ', $placeholders) . ")
+                   AND created_at >= %s AND created_at < %s
+                 GROUP BY utm_source, utm_medium, utm_campaign, utm_id, utm_term, utm_content",
+                $params
+            ));
+
+            foreach ($conversionRows as $row) {
+                $key = self::campaignContentKey(
+                    $row['utm_source'],
+                    $row['utm_medium'],
+                    $row['utm_campaign'],
+                    $row['utm_id'],
+                    $row['utm_term'],
+                    $row['utm_content']
+                );
+                $conversions[$key] = (int) $row['conversions'];
+            }
         }
 
         return array_map(static function (array $row) use ($conversions): array {
-            $key = $row['utm_source'] . '|' . $row['utm_campaign'] . '|' . $row['utm_term'] . '|' . $row['utm_content'];
+            $key = self::campaignContentKey(
+                $row['utm_source'],
+                $row['utm_medium'],
+                $row['utm_campaign'],
+                $row['utm_id'],
+                $row['utm_term'],
+                $row['utm_content']
+            );
 
             return [
                 'utm_source'   => (string) $row['utm_source'],
+                'utm_medium'   => (string) $row['utm_medium'],
                 'utm_campaign' => (string) $row['utm_campaign'],
+                'utm_id'       => (string) $row['utm_id'],
                 'utm_term'     => (string) $row['utm_term'],
                 'utm_content'  => (string) $row['utm_content'],
                 'views'        => (int) $row['views'],
                 'sessions'     => (int) $row['sessions'],
                 'conversions'  => $conversions[$key] ?? 0,
             ];
-        }, (array) $rows);
+        }, $rows);
+    }
+
+    /**
+     * Collision-safe composite key for a six-field UTM combination — see
+     * {@see campaignKey()} for why a plain pipe-concatenation is avoided.
+     *
+     * @param string $source   utm_source.
+     * @param string $medium   utm_medium.
+     * @param string $campaign utm_campaign.
+     * @param string $id       utm_id.
+     * @param string $term     utm_term.
+     * @param string $content  utm_content.
+     * @return string
+     */
+    private static function campaignContentKey(
+        string $source,
+        string $medium,
+        string $campaign,
+        string $id,
+        string $term,
+        string $content
+    ): string {
+        return implode("\x1f", [$source, $medium, $campaign, $id, $term, $content]);
     }
 
     /**
@@ -494,36 +665,30 @@ final class Reports
         global $wpdb;
         $table = DatabaseManager::tableName();
 
-        $rows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT channel, COUNT(*) AS views, COUNT(DISTINCT session_id) AS sessions
-                 FROM {$table}
-                 WHERE event_type = 'pageview' AND channel <> ''
-                   AND created_at >= %s AND created_at < %s
-                 GROUP BY channel
-                 ORDER BY sessions DESC",
-                $start,
-                $end
-            ),
-            ARRAY_A
-        );
+        $rows = self::queryRows($wpdb->prepare(
+            "SELECT channel, COUNT(*) AS views, COUNT(DISTINCT session_id) AS sessions
+             FROM {$table}
+             WHERE event_type = 'pageview' AND channel <> ''
+               AND created_at >= %s AND created_at < %s
+             GROUP BY channel
+             ORDER BY sessions DESC",
+            $start,
+            $end
+        ));
 
-        $conversionRows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT channel, COUNT(DISTINCT event_value) AS conversions,
-                        COUNT(DISTINCT session_id) AS converting_sessions
-                 FROM {$table}
-                 WHERE event_type = 'form_success'
-                   AND created_at >= %s AND created_at < %s
-                 GROUP BY channel",
-                $start,
-                $end
-            ),
-            ARRAY_A
-        );
+        $conversionRows = self::queryRows($wpdb->prepare(
+            "SELECT channel, COUNT(DISTINCT event_value) AS conversions,
+                    COUNT(DISTINCT session_id) AS converting_sessions
+             FROM {$table}
+             WHERE event_type = 'form_success'
+               AND created_at >= %s AND created_at < %s
+             GROUP BY channel",
+            $start,
+            $end
+        ));
 
         $conversions = [];
-        foreach ((array) $conversionRows as $row) {
+        foreach ($conversionRows as $row) {
             $conversions[(string) $row['channel']] = [
                 'conversions'         => (int) $row['conversions'],
                 'converting_sessions' => (int) $row['converting_sessions'],
@@ -531,7 +696,7 @@ final class Reports
         }
 
         $out = [];
-        foreach ((array) $rows as $row) {
+        foreach ($rows as $row) {
             $channel  = (string) $row['channel'];
             $sessions = (int) $row['sessions'];
             $counts   = $conversions[$channel] ?? ['conversions' => 0, 'converting_sessions' => 0];
@@ -590,33 +755,30 @@ final class Reports
         global $wpdb;
         $table = DatabaseManager::tableName();
 
-        $rows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT e.page_url, MAX(e.page_title) AS page_title, COUNT(*) AS sessions
-                 FROM (
-                     SELECT MIN(id) AS first_id
-                     FROM {$table}
-                     WHERE event_type = 'pageview' AND session_id <> ''
-                       AND created_at < %s
-                     GROUP BY session_id
-                     HAVING MIN(created_at) >= %s
-                 ) AS f
-                 INNER JOIN {$table} AS e ON e.id = f.first_id
-                 GROUP BY e.page_url
-                 ORDER BY sessions DESC
-                 LIMIT %d",
-                $end,
-                $start,
-                $limit
-            ),
-            ARRAY_A
-        );
+        $rows = self::queryRows($wpdb->prepare(
+            "SELECT e.page_url, MAX(e.page_title) AS page_title, COUNT(*) AS sessions
+             FROM (
+                 SELECT MIN(id) AS first_id
+                 FROM {$table}
+                 WHERE event_type = 'pageview' AND session_id <> ''
+                   AND created_at < %s
+                 GROUP BY session_id
+                 HAVING MIN(created_at) >= %s
+             ) AS f
+             INNER JOIN {$table} AS e ON e.id = f.first_id
+             GROUP BY e.page_url
+             ORDER BY sessions DESC
+             LIMIT %d",
+            $end,
+            $start,
+            $limit
+        ));
 
         return array_map(static fn(array $row): array => [
             'page_url'   => (string) $row['page_url'],
             'page_title' => (string) $row['page_title'],
             'sessions'   => (int) $row['sessions'],
-        ], (array) $rows);
+        ], $rows);
     }
 
     /**
@@ -633,16 +795,14 @@ final class Reports
         global $wpdb;
         $table = DatabaseManager::tableName();
 
-        return (int) $wpdb->get_var(
-            $wpdb->prepare(
-                "SELECT COUNT(DISTINCT event_value)
-                 FROM {$table}
-                 WHERE event_type = 'form_success'
-                   AND created_at >= %s AND created_at < %s",
-                $start,
-                $end
-            )
-        );
+        return (int) self::queryValue($wpdb->prepare(
+            "SELECT COUNT(DISTINCT event_value)
+             FROM {$table}
+             WHERE event_type = 'form_success'
+               AND created_at >= %s AND created_at < %s",
+            $start,
+            $end
+        ));
     }
 
     /**
@@ -669,29 +829,27 @@ final class Reports
         global $wpdb;
         $table = DatabaseManager::tableName();
 
-        $boundary = $wpdb->get_var(
-            $wpdb->prepare(
-                "SELECT created_at
-                 FROM {$table}
-                 WHERE event_type = 'form_success'
-                   AND created_at >= %s AND created_at < %s
-                 ORDER BY created_at ASC
-                 LIMIT 1 OFFSET %d",
-                $start,
-                $end,
-                max(1, $max)
-            )
-        );
+        $boundary = self::queryValue($wpdb->prepare(
+            "SELECT created_at
+             FROM {$table}
+             WHERE event_type = 'form_success'
+               AND created_at >= %s AND created_at < %s
+             ORDER BY created_at ASC
+             LIMIT 1 OFFSET %d",
+            $start,
+            $end,
+            max(1, $max)
+        ));
 
         if ($boundary === null) {
             return $end;
         }
 
-        if ((string) $boundary <= $start) {
+        if ($boundary <= $start) {
             return gmdate('Y-m-d H:i:s', (int) strtotime($start . ' UTC') + 1);
         }
 
-        return (string) $boundary;
+        return $boundary;
     }
 
     /**
@@ -713,26 +871,23 @@ final class Reports
         global $wpdb;
         $table = DatabaseManager::tableName();
 
-        $rows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT event_value, element_label, page_url, referrer, device, channel,
-                        utm_source, utm_medium, utm_campaign, utm_id, utm_term, utm_content,
-                        click_id_type, created_at
-                 FROM {$table}
-                 WHERE event_type = 'form_success'
-                   AND created_at >= %s AND created_at < %s
-                 ORDER BY id DESC
-                 LIMIT %d",
-                $start,
-                $end,
-                $limit
-            ),
-            ARRAY_A
-        );
+        $rows = self::queryRows($wpdb->prepare(
+            "SELECT event_value, element_label, page_url, referrer, device, channel,
+                    utm_source, utm_medium, utm_campaign, utm_id, utm_term, utm_content,
+                    click_id_type, created_at
+             FROM {$table}
+             WHERE event_type = 'form_success'
+               AND created_at >= %s AND created_at < %s
+             ORDER BY id DESC
+             LIMIT %d",
+            $start,
+            $end,
+            $limit
+        ));
 
         $out  = [];
         $seen = [];
-        foreach ((array) $rows as $row) {
+        foreach ($rows as $row) {
             $id = (string) $row['event_value'];
             if ($id !== '' && isset($seen[$id])) {
                 continue; // At-least-once duplicate of a conversion already listed.
@@ -774,21 +929,18 @@ final class Reports
         global $wpdb;
         $table = DatabaseManager::tableName();
 
-        $rows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT device, COUNT(*) AS views
-                 FROM {$table}
-                 WHERE event_type = 'pageview' AND created_at >= %s AND created_at < %s
-                 GROUP BY device
-                 ORDER BY views DESC",
-                $start,
-                $end
-            ),
-            ARRAY_A
-        );
+        $rows = self::queryRows($wpdb->prepare(
+            "SELECT device, COUNT(*) AS views
+             FROM {$table}
+             WHERE event_type = 'pageview' AND created_at >= %s AND created_at < %s
+             GROUP BY device
+             ORDER BY views DESC",
+            $start,
+            $end
+        ));
 
         $breakdown = [];
-        foreach ((array) $rows as $row) {
+        foreach ($rows as $row) {
             $device = (string) $row['device'];
             $breakdown[$device !== '' ? $device : 'unknown'] = (int) $row['views'];
         }
@@ -808,19 +960,14 @@ final class Reports
         global $wpdb;
         $table = DatabaseManager::tableName();
 
-        $rows = $wpdb->get_results(
-            $wpdb->prepare(
-                "SELECT event_type, page_url, page_title, element_label, target_url,
-                        event_value, device, created_at
-                 FROM {$table}
-                 ORDER BY id DESC
-                 LIMIT %d",
-                $limit
-            ),
-            ARRAY_A
-        );
-
-        return (array) $rows;
+        return self::queryRows($wpdb->prepare(
+            "SELECT event_type, page_url, page_title, element_label, target_url,
+                    event_value, device, created_at
+             FROM {$table}
+             ORDER BY id DESC
+             LIMIT %d",
+            $limit
+        ));
     }
 
     /**
@@ -842,11 +989,26 @@ final class Reports
      * @param string $end   UTC datetime (exclusive).
      * @param int    $limit Maximum rows per "top_*" list.
      * @return array<string, mixed>
+     * @throws ReportQueryException When any underlying query fails — callers
+     *         (the dashboard, the webhook dispatcher) must not treat a caught
+     *         exception's fallback as a legitimate empty/zero result.
      */
     public static function buildSummary(string $start, string $end, int $limit = 10): array
     {
+        $totals = self::totalsByType($start, $end);
+
+        // The distinct conversion count is already computed below for
+        // conversions.total — reuse it here too so totals.form_success agrees
+        // with the Campaigns/Channels reports (which also dedupe by
+        // conversion id) instead of the raw, potentially-redelivered row
+        // count, without running COUNT(DISTINCT event_value) twice.
+        $conversionTotal = self::conversionCount($start, $end);
+        if (array_key_exists('form_success', $totals)) {
+            $totals['form_success'] = $conversionTotal;
+        }
+
         return [
-            'totals'               => self::totalsByType($start, $end),
+            'totals'               => $totals,
             'daily_pageviews'      => self::dailyCounts($start, $end, 'pageview'),
             'top_pages'            => self::topPages($start, $end, $limit),
             'top_landing_pages'    => self::topLandingPages($start, $end, $limit),
@@ -858,7 +1020,7 @@ final class Reports
             'top_campaign_content' => self::topCampaignContent($start, $end, $limit),
             'channels'             => self::channelBreakdown($start, $end),
             'conversions'          => [
-                'total'  => self::conversionCount($start, $end),
+                'total'  => $conversionTotal,
                 'recent' => self::recentConversions($start, $end, 500),
             ],
             'devices'              => self::deviceBreakdown($start, $end),

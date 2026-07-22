@@ -185,8 +185,91 @@ final class DatabaseManager
     /** @var int Rows deleted per statement during retention cleanup. */
     private const CLEANUP_CHUNK = 5000;
 
-    /** @var int Maximum delete chunks per cron run, so one request can't run indefinitely. */
+    /** @var int Maximum delete chunks per daily cron run, so one request can't run indefinitely. */
     private const CLEANUP_MAX_CHUNKS = 40;
+
+    /**
+     * Maximum delete chunks per catch-up invocation — deliberately smaller
+     * than the daily run's budget (40,000 rows vs. 200,000), gentler on
+     * shared/budget hosting for what is, by definition, an unattended
+     * follow-up run rather than the main scheduled pass.
+     *
+     * @var int
+     */
+    private const CLEANUP_CATCHUP_MAX_CHUNKS = 8;
+
+    /**
+     * Wall-clock seconds budgeted per invocation for a bounded delete loop —
+     * the events-table loop below, and (independently) DeliveryLog::purgeOld()'s
+     * own loop and the rate-limit-counter purge's loop. A chunk-count cap
+     * alone doesn't bound elapsed time if individual DELETE statements run
+     * slower than expected (lock contention, an overloaded shared host,
+     * replication lag); this is comfortably under typical PHP
+     * max_execution_time defaults (commonly 30s), leaving headroom for the
+     * rest of that request's work.
+     *
+     * @var int
+     */
+    private const CLEANUP_TIME_BUDGET = 20;
+
+    /** @var string Option key for the cleanup mutex (events-table deletion only — see acquireCleanupLock()). */
+    private const CLEANUP_LOCK_OPTION = 'spa_cleanup_lock';
+
+    /**
+     * Seconds after which the cleanup lock's lease is considered stale and
+     * may be stolen. Tied to CLEANUP_TIME_BUDGET by formula (2x) so the two
+     * can't drift out of sync if one is retuned later — comfortably outlives
+     * one full bounded loop even if it runs right up to its own time budget,
+     * plus margin for acquire/release overhead.
+     *
+     * @var int
+     */
+    private const CLEANUP_LOCK_TIMEOUT = self::CLEANUP_TIME_BUDGET * 2;
+
+    /**
+     * Cron hook for a one-shot catch-up continuation, scheduled when a
+     * cleanup run's own bound is hit before the backlog is cleared (or the
+     * lock could not be acquired, or was lost mid-loop, or a DELETE itself
+     * failed). Self-perpetuating from there: each catch-up run reschedules
+     * another one of these under the same conditions, until a run finally
+     * reports 'completed'.
+     *
+     * @var string
+     */
+    public const CLEANUP_CATCHUP_HOOK = 'spa_cleanup_old_events_catchup';
+
+    /**
+     * Seconds before retrying after a failed lock acquisition — short,
+     * distinct from the normal catch-up cadence, since contention may well
+     * clear within minutes rather than needing a full cadence-length wait.
+     *
+     * @var int
+     */
+    private const CLEANUP_RETRY_COOLDOWN = 5 * MINUTE_IN_SECONDS;
+
+    /**
+     * Seconds before the next catch-up attempt when the previous one
+     * genuinely ran (acquired the lock) but did not finish the backlog
+     * (truncated, a query failed, or the lock was lost mid-loop).
+     *
+     * @var int
+     */
+    private const CLEANUP_CATCHUP_CADENCE = 20 * MINUTE_IN_SECONDS;
+
+    /** @var int Rate-limit-counter option rows deleted per statement. */
+    private const CLEANUP_RATE_LIMIT_CHUNK = 5000;
+
+    /**
+     * Maximum rate-limit-counter delete chunks per run (100,000 rows) —
+     * generous relative to plausible per-IP-hash row volume for one day's
+     * distinct IPs. Independent of the events-table lock/catch-up chain: if
+     * a sustained, highly-distributed-IP flood ever did outpace this, rows
+     * would persist an extra day at a time — an accepted limitation for this
+     * small option-table housekeeping, not chased with a matching lock.
+     *
+     * @var int
+     */
+    private const CLEANUP_RATE_LIMIT_MAX_CHUNKS = 20;
 
     /**
      * Inserts a single event row.
@@ -356,9 +439,12 @@ final class DatabaseManager
         if ($row['channel'] === '' && in_array($type, self::ATTRIBUTED_TYPES, true)) {
             // session_referrer — the referrer the session entered through,
             // persisted by the tracker — feeds classification only; it is
-            // not a stored column, so it never reaches the INSERT.
+            // not a stored column, so it never reaches the INSERT. Likewise
+            // session_direct, the companion marker for a session that
+            // entered with no referrer at all.
             $context = $row;
             $context['session_referrer'] = self::truncate(esc_url_raw((string) ($data['session_referrer'] ?? '')), 255);
+            $context['session_direct']   = !empty($data['session_direct']);
 
             $row['channel'] = self::truncate(Channels::classify($context, $type), 24);
         }
@@ -385,42 +471,330 @@ final class DatabaseManager
     }
 
     /**
-     * Deletes rows older than the configured retention window.
+     * Deletes rows older than the configured retention window, and purges
+     * expired rate-limit-counter option rows.
      *
-     * Runs daily via the spa_cleanup_old_events cron event. Timestamps are
-     * stored in UTC, so the cutoff is computed with gmdate(). Deletion runs
-     * in bounded chunks — one giant DELETE on a large table can hold locks
-     * for seconds and stall replication — and the chunks per run are capped,
-     * so a huge backlog is worked off across successive daily runs instead
-     * of pinning one request indefinitely.
+     * Runs daily via the spa_cleanup_old_events cron event. The events-table
+     * deletion is bounded per invocation (chunk count AND wall-clock time,
+     * see {@see cleanupEventRows()}) and runs under a lease-based mutex
+     * shared with the catch-up hook (see {@see acquireCleanupLock()}) — never
+     * MySQL's GET_LOCK(), see that method's docblock for why. When this run's
+     * own bound is hit before the backlog is cleared — or the lock could not
+     * be acquired, or was lost mid-loop, or a DELETE itself failed — this
+     * schedules the FIRST catch-up continuation; {@see cleanupOldEventsCatchUp()}
+     * then reschedules itself for as long as the backlog remains unresolved.
+     *
+     * The rate-limit-counter purge is an unrelated table with no catch-up
+     * chain of its own — it always runs regardless of whether the
+     * events-table lock was available this invocation, so contention on one
+     * never delays the other's housekeeping.
      *
      * @return void
      */
     public static function cleanupOldEvents(): void
     {
+        $lock = self::acquireCleanupLock();
+
+        if ($lock === null) {
+            self::scheduleCleanupCatchUp(self::CLEANUP_RETRY_COOLDOWN);
+        } else {
+            try {
+                $outcome = self::cleanupEventRows(self::CLEANUP_MAX_CHUNKS, $lock);
+            } finally {
+                self::releaseCleanupLock($lock);
+            }
+
+            if ($outcome !== 'completed') {
+                self::scheduleCleanupCatchUp(self::CLEANUP_CATCHUP_CADENCE);
+            }
+        }
+
+        self::purgeRateLimitCounters();
+    }
+
+    /**
+     * Cron callback for one catch-up continuation of a truncated, failed, or
+     * lock-losing cleanup run — see {@see CLEANUP_CATCHUP_HOOK}.
+     *
+     * Uses the smaller {@see CLEANUP_CATCHUP_MAX_CHUNKS} budget, not the
+     * daily run's. Does NOT purge rate-limit counters — that independent
+     * purge belongs to the daily run only, so a busy catch-up chain never
+     * runs it more than once a day.
+     *
+     * @return void
+     */
+    public static function cleanupOldEventsCatchUp(): void
+    {
+        $lock = self::acquireCleanupLock();
+
+        if ($lock === null) {
+            self::scheduleCleanupCatchUp(self::CLEANUP_RETRY_COOLDOWN);
+            return;
+        }
+
+        try {
+            $outcome = self::cleanupEventRows(self::CLEANUP_CATCHUP_MAX_CHUNKS, $lock);
+        } finally {
+            self::releaseCleanupLock($lock);
+        }
+
+        if ($outcome !== 'completed') {
+            self::scheduleCleanupCatchUp(self::CLEANUP_CATCHUP_CADENCE);
+        }
+    }
+
+    /**
+     * Schedules {@see CLEANUP_CATCHUP_HOOK} after $delay seconds, unless it
+     * is already scheduled — checked against the catch-up hook specifically,
+     * never the daily hook, so this can never be suppressed by mistaking the
+     * unrelated daily schedule for its own.
+     *
+     * @param int $delay Seconds from now.
+     * @return void
+     */
+    private static function scheduleCleanupCatchUp(int $delay): void
+    {
+        if (!wp_next_scheduled(self::CLEANUP_CATCHUP_HOOK)) {
+            wp_schedule_single_event(time() + $delay, self::CLEANUP_CATCHUP_HOOK);
+        }
+    }
+
+    /**
+     * Deletes event rows older than the retention cutoff in bounded chunks,
+     * stopping at whichever comes first: $maxChunks statements, the
+     * wall-clock time budget, or losing ownership of $lock.
+     *
+     * Requires the caller to already hold the cleanup lock and pass its
+     * token in — this renews/verifies that ownership as it loops but never
+     * acquires or releases the lock itself (the caller owns that lifecycle).
+     *
+     * @param int    $maxChunks Maximum DELETE statements to run this invocation.
+     * @param string $lock      The lock token this invocation's caller acquired.
+     * @return string One of 'completed', 'truncated', 'query_failed', 'lock_lost'.
+     */
+    private static function cleanupEventRows(int $maxChunks, string $lock): string
+    {
         global $wpdb;
 
-        $cutoff = gmdate('Y-m-d H:i:s', time() - Options::retentionDays() * DAY_IN_SECONDS);
-        $table  = self::tableName();
-        $runs   = 0;
+        $cutoff   = gmdate('Y-m-d H:i:s', time() - Options::retentionDays() * DAY_IN_SECONDS);
+        $table    = self::tableName();
+        $deadline = microtime(true) + self::CLEANUP_TIME_BUDGET;
 
-        do {
-            $deleted = $wpdb->query(
-                $wpdb->prepare(
-                    "DELETE FROM {$table} WHERE created_at < %s LIMIT %d",
-                    $cutoff,
-                    self::CLEANUP_CHUNK
-                )
-            );
-        } while (is_int($deleted) && $deleted === self::CLEANUP_CHUNK && ++$runs < self::CLEANUP_MAX_CHUNKS);
+        for ($chunk = 0; $chunk < $maxChunks; $chunk++) {
+            // Chunk 0 skips the renewal check: the lock was just acquired by
+            // this same request, so there is nothing yet that could have
+            // gone stale. Every later chunk renews first — a prior chunk's
+            // DELETE can take long enough for the lease to go stale, and
+            // renewing confirms this run still legitimately owns the lock
+            // before deleting more rows under it.
+            if ($chunk > 0 && !self::renewCleanupLock($lock, $chunk)) {
+                return 'lock_lost';
+            }
 
-        // Rate-limit counter rows (written directly to the options table by
-        // the REST controller when no persistent object cache is available;
-        // one row per recently seen IP hash plus the site-wide bucket). Each
-        // row self-resets when its minute-window rolls over, but rows for
-        // IPs never seen again would otherwise linger forever. At worst this
-        // resets counters mid-window once a day — negligible.
-        $wpdb->query("DELETE FROM {$wpdb->options} WHERE option_name LIKE 'spa\\_rl\\_%'");
+            $deleted = $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$table} WHERE created_at < %s LIMIT %d",
+                $cutoff,
+                self::CLEANUP_CHUNK
+            ));
+
+            if (!is_int($deleted)) {
+                return 'query_failed';
+            }
+
+            if ($deleted < self::CLEANUP_CHUNK) {
+                return 'completed';
+            }
+
+            if (microtime(true) >= $deadline) {
+                return 'truncated';
+            }
+        }
+
+        return 'truncated';
+    }
+
+    /**
+     * Deletes expired rate-limit-counter option rows in bounded chunks.
+     *
+     * Rate-limit counter rows are written directly to the options table by
+     * the REST controller when no persistent object cache is available (one
+     * row per recently seen IP hash plus the site-wide bucket). Each row
+     * self-resets when its minute-window rolls over, but rows for IPs never
+     * seen again would otherwise linger forever.
+     *
+     * Deliberately independent of the events-table lock and its catch-up
+     * chain — an unrelated table, with no continuation needed if the
+     * (generous) per-run budget is ever exceeded, see
+     * {@see CLEANUP_RATE_LIMIT_MAX_CHUNKS}.
+     *
+     * @return void
+     */
+    private static function purgeRateLimitCounters(): void
+    {
+        global $wpdb;
+
+        $deadline = microtime(true) + self::CLEANUP_TIME_BUDGET;
+
+        for ($chunk = 0; $chunk < self::CLEANUP_RATE_LIMIT_MAX_CHUNKS; $chunk++) {
+            $deleted = $wpdb->query($wpdb->prepare(
+                "DELETE FROM {$wpdb->options} WHERE option_name LIKE 'spa\\_rl\\_%%' LIMIT %d",
+                self::CLEANUP_RATE_LIMIT_CHUNK
+            ));
+
+            if (!is_int($deleted) || $deleted < self::CLEANUP_RATE_LIMIT_CHUNK) {
+                return;
+            }
+
+            if (microtime(true) >= $deadline) {
+                return;
+            }
+        }
+    }
+
+    /**
+     * Acquires the cleanup mutex without blocking — an option-row lease
+     * only, deliberately never MySQL's GET_LOCK().
+     *
+     * Named locks are tied to the specific database CONNECTION that acquired
+     * them, and $wpdb transparently reconnects and retries a query after a
+     * "server has gone away" error entirely within one $wpdb->query() call —
+     * if that happens to a DELETE inside the cleanup loop, it runs,
+     * successfully, on a new connection that does not hold the old
+     * connection's named lock, and no between-chunk ownership check can ever
+     * catch it, because the reconnect happens INSIDE a single query call,
+     * not between iterations. For a loop whose worst failure mode if
+     * unlocked is genuine concurrent deletion, that blind spot is
+     * unacceptable — the option-row lease's worst case (a bounded wait for a
+     * stale lease to expire) is strictly safer.
+     *
+     * The lease value is "token|timestamp|counter" (see
+     * {@see renewCleanupLock()} for why a counter, not just a timestamp, is
+     * needed) and is created via INSERT IGNORE — the options table's unique
+     * key on option_name means exactly one concurrent caller's insert
+     * succeeds, no read-then-write gap. A lease older than
+     * CLEANUP_LOCK_TIMEOUT may be stolen, but only via compare-and-delete on
+     * the exact stale value, so two would-be stealers can never both believe
+     * they freed it.
+     *
+     * @return string|null The acquired token (pass to renewCleanupLock() and
+     *                      releaseCleanupLock()), or null when another
+     *                      process holds the lock.
+     */
+    private static function acquireCleanupLock(): ?string
+    {
+        global $wpdb;
+
+        $token = md5(wp_generate_uuid4() . wp_rand());
+        $value = $token . '|' . time() . '|0';
+
+        if (self::insertCleanupLockRow($value)) {
+            return $token;
+        }
+
+        $held = (string) $wpdb->get_var($wpdb->prepare(
+            "SELECT option_value FROM {$wpdb->options} WHERE option_name = %s",
+            self::CLEANUP_LOCK_OPTION
+        ));
+
+        if ($held === '') {
+            return null;
+        }
+
+        $parts  = explode('|', $held, 3);
+        $heldTs = (int) ($parts[1] ?? 0);
+
+        if (time() - $heldTs < self::CLEANUP_LOCK_TIMEOUT) {
+            return null;
+        }
+
+        $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value = %s",
+            self::CLEANUP_LOCK_OPTION,
+            $held
+        ));
+        wp_cache_delete(self::CLEANUP_LOCK_OPTION, 'options');
+
+        return self::insertCleanupLockRow($value) ? $token : null;
+    }
+
+    /**
+     * Atomically creates the cleanup lock row.
+     *
+     * @param string $value Lock value ("token|timestamp|counter").
+     * @return bool True when this call created the row.
+     */
+    private static function insertCleanupLockRow(string $value): bool
+    {
+        global $wpdb;
+
+        $inserted = $wpdb->query($wpdb->prepare(
+            "INSERT IGNORE INTO {$wpdb->options} (option_name, option_value, autoload) VALUES (%s, %s, 'off')",
+            self::CLEANUP_LOCK_OPTION,
+            $value
+        ));
+        wp_cache_delete(self::CLEANUP_LOCK_OPTION, 'options');
+
+        return $inserted === 1;
+    }
+
+    /**
+     * Extends the cleanup lock's lease while its holder is still working,
+     * reporting whether this holder still verifiably owns it.
+     *
+     * The stored value is "token|timestamp|counter": the counter is an
+     * in-memory count of chunks processed so far this run, supplied by the
+     * caller and therefore trivially, actually guaranteed unique across
+     * repeated renewals within one loop's lifetime — unlike microtime(true),
+     * which is merely very unlikely to collide, not mathematically
+     * guaranteed. This matters specifically for renewals landing within the
+     * same wall-clock second: two such renewals would otherwise risk writing
+     * identical "token|timestamp" values with nothing left to distinguish
+     * "freshly renewed" from "stale" within that second.
+     *
+     * Parsed with a fixed three-segment explode() in {@see acquireCleanupLock()}'s
+     * stale-lease check — not "whatever comes after the last pipe" — so a
+     * value with a different number of segments is never misread as a
+     * wildly-stale (or wildly-fresh) timestamp.
+     *
+     * @param string $lock     The token acquireCleanupLock() returned.
+     * @param int    $renewals Renewal counter for this call (the caller's chunk index).
+     * @return bool True when the UPDATE matched this holder's own row (lock still owned).
+     */
+    private static function renewCleanupLock(string $lock, int $renewals): bool
+    {
+        global $wpdb;
+
+        $updated = $wpdb->query($wpdb->prepare(
+            "UPDATE {$wpdb->options} SET option_value = %s WHERE option_name = %s AND option_value LIKE %s",
+            $lock . '|' . time() . '|' . $renewals,
+            self::CLEANUP_LOCK_OPTION,
+            $wpdb->esc_like($lock) . '|%'
+        ));
+        wp_cache_delete(self::CLEANUP_LOCK_OPTION, 'options');
+
+        return $updated === 1;
+    }
+
+    /**
+     * Releases the cleanup lock acquired by {@see acquireCleanupLock()}.
+     *
+     * Compare-and-delete on the ownership token: if this run's lease lapsed
+     * and another process stole the lock, the DELETE matches nothing and the
+     * new holder keeps its mutex.
+     *
+     * @param string $lock The token acquireCleanupLock() returned.
+     * @return void
+     */
+    private static function releaseCleanupLock(string $lock): void
+    {
+        global $wpdb;
+
+        $wpdb->query($wpdb->prepare(
+            "DELETE FROM {$wpdb->options} WHERE option_name = %s AND option_value LIKE %s",
+            self::CLEANUP_LOCK_OPTION,
+            $wpdb->esc_like($lock) . '|%'
+        ));
+        wp_cache_delete(self::CLEANUP_LOCK_OPTION, 'options');
     }
 
     /**

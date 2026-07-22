@@ -41,6 +41,18 @@ final class DeliveryLog
     private const CLEANUP_MAX_CHUNKS = 20;
 
     /**
+     * Wall-clock seconds budgeted for one purgeOld() run, alongside the
+     * chunk-count cap above. A chunk-count cap alone doesn't bound elapsed
+     * time if individual DELETE statements run slower than expected (lock
+     * contention, an overloaded shared host, replication lag) — these rows
+     * carry full request/response bodies (LONGTEXT), so a slow statement here
+     * is more plausible than on a small fixed-width table.
+     *
+     * @var int
+     */
+    private const CLEANUP_TIME_BUDGET = 20;
+
+    /**
      * Substrings of JSON keys whose values are redacted from stored response
      * bodies. Endpoint responses sometimes echo debugging data or secrets;
      * the log must not become a credential store.
@@ -445,9 +457,10 @@ final class DeliveryLog
     {
         global $wpdb;
 
-        $cutoff = gmdate('Y-m-d H:i:s', time() - Options::retentionDays() * DAY_IN_SECONDS);
-        $table  = self::tableName();
-        $runs   = 0;
+        $cutoff   = gmdate('Y-m-d H:i:s', time() - Options::retentionDays() * DAY_IN_SECONDS);
+        $table    = self::tableName();
+        $deadline = microtime(true) + self::CLEANUP_TIME_BUDGET;
+        $runs     = 0;
 
         do {
             $deleted = $wpdb->query(
@@ -457,7 +470,11 @@ final class DeliveryLog
                     self::CLEANUP_CHUNK
                 )
             );
-        } while (is_int($deleted) && $deleted === self::CLEANUP_CHUNK && ++$runs < self::CLEANUP_MAX_CHUNKS);
+        } while (
+            is_int($deleted) && $deleted === self::CLEANUP_CHUNK
+            && ++$runs < self::CLEANUP_MAX_CHUNKS
+            && microtime(true) < $deadline
+        );
     }
 
     /**

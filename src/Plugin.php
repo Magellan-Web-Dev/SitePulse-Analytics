@@ -73,6 +73,7 @@ final class Plugin
 
         add_action('spa_cleanup_old_events', [DatabaseManager::class, 'cleanupOldEvents']);
         add_action('spa_cleanup_old_events', [DeliveryLog::class, 'purgeOld']);
+        add_action(DatabaseManager::CLEANUP_CATCHUP_HOOK, [DatabaseManager::class, 'cleanupOldEventsCatchUp']);
 
         $this->ensureCronScheduled();
 
